@@ -25,6 +25,31 @@ import psutil
 import threading
 import time
 
+# ──────────────────────────────────────────────────────────────────────────────
+# SubsetWithTargets: torch.utils.data.Subset 에 .targets 속성까지 복사
+# ──────────────────────────────────────────────────────────────────────────────
+class SubsetWithTargets(torch.utils.data.Subset):
+    def __init__(self, dataset, indices):
+        super().__init__(dataset, indices)
+        if hasattr(dataset, "targets"):            # TensorDataset, SplitImageFolder 등
+            self.targets = np.asarray(dataset.targets)[indices]
+        elif hasattr(dataset, "tensors"):          # TensorDataset
+            self.targets = dataset.tensors[1].numpy()[indices]
+        else:
+            raise AttributeError(
+                "custom_counts: 대상 데이터셋에 targets 속성을 찾을 수 없습니다."
+            )
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', '1'):
+        return True
+    if v.lower() in ('no', 'false', 'f', '0'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 class ResourceTracker:
     def __init__(self, device_index=0, interval=1):
         self.device_index = device_index
@@ -113,8 +138,8 @@ if __name__ == "__main__":
     
     
     # 1. 추적 시작
-    tracker = ResourceTracker(interval=5)
-    tracker.start()
+    # tracker = ResourceTracker(interval=5)
+    # tracker.start()
     
     parser = argparse.ArgumentParser(description='Multi-Domain LT')
     # training
@@ -125,6 +150,59 @@ if __name__ == "__main__":
     parser.add_argument('--imb_type', type=str, default="eeee",
                         help='Length should be equal to # of envs, each refers to imb_type within that env')
     parser.add_argument('--imb_factor', type=float, default=0.1)
+
+    # scuttie - for custom counts
+    parser.add_argument('--custom_counts', type=str, default=None,
+                        help='JSON list (len=#env) of per‑class counts for *train* split')
+    parser.add_argument('--cross_env_gamma',
+                        type=float,
+                        default=None,
+                        help='(BoDA 전용) cross_env_gamma 값을 수동으로 override')
+    parser.add_argument(
+        '--use_boda',
+        type=str2bool,
+        nargs='?',
+        const=True,
+        default=True,
+        help='Whether to apply BoDA loss (True/False).'
+    )
+    parser.add_argument(
+        '--use_xent',
+        type=str2bool,
+        nargs='?',
+        const=True,
+        default=True,
+        help='Whether to include cross-entropy loss (True/False)'
+    )
+    parser.add_argument(
+        '--use_calibration',
+        type=str2bool,
+        nargs='?',
+        const=True,
+        default=True,
+        help='Whether to include calibration (True/False)'
+    )
+    parser.add_argument(
+        '--boda_dist_measure',
+        type=str,
+        default='coral',
+        choices=['coral', 'mahalanobis'],
+        help='(BoDA only) Distance measure for macro-alignment penalty.'
+    )
+    parser.add_argument('--global_weight',
+                        type=float,
+                        default=0.0,
+                        help='Weight β for the global imbalance loss term')
+    parser.add_argument('--macro_weight',
+                        type=float,
+                        default=None,
+                        help='(BoDA only) Weight for the macro-alignment penalty.')
+    parser.add_argument('--target_adv_weight', type=float, default=None,
+                        help='(CAWRA_TAROT only) Weight for the target adversarial loss.')
+    parser.add_argument('--pgd_eps', type=float, default=None,
+                        help='(CAWRA_TAROT only) Epsilon for PGD attack.')
+
+
     # others
     # parser.add_argument('--data_dir', type=str, default="./data")
     parser.add_argument('--data_dir', type=str, default="/home/shared")
@@ -185,6 +263,31 @@ if __name__ == "__main__":
         hparams.update({'imb_type_per_env': [misc.IMBALANCE_TYPE[x] for x in args.imb_type],
                         'imb_factor': args.imb_factor})
 
+    # BoDA 알고리즘일 때, CLI로 넘긴 gamma 값으로 덮어쓰기
+    if 'BoDA' in args.algorithm or args.algorithm == 'CAWRA_TAROT':
+        if args.cross_env_gamma is not None:
+            hparams['cross_env_gamma'] = args.cross_env_gamma
+        hparams['use_boda'] = args.use_boda
+        hparams['use_xent'] = args.use_xent
+        hparams['global_weight'] = args.global_weight
+        hparams['use_calibration'] = args.use_calibration
+        hparams['boda_dist_measure'] = args.boda_dist_measure
+        if args.macro_weight is not None:
+            hparams['macro_weight'] = args.macro_weight
+
+    if args.algorithm == 'CAWRA_TAROT':
+        if args.target_adv_weight is not None:
+            hparams['target_adv_weight'] = args.target_adv_weight
+        if args.pgd_eps is not None:
+            hparams['pgd_eps'] = args.pgd_eps / 255.0 # 입력은 8, 16 등으로 받고 255로 나눠줌
+
+    # 전달 받은 custom_counts → hparams 로 넘겨 데이터셋 생성 단계에서 사용
+    if args.custom_counts:
+        hparams['custom_counts'] = json.loads(args.custom_counts)
+    else:
+        hparams['custom_counts'] = None
+    
+
     print('HParams:')
     for k, v in sorted(hparams.items()):
         print('\t{}: {}'.format(k, v))
@@ -201,6 +304,43 @@ if __name__ == "__main__":
         train_dataset = vars(datasets)[args.dataset](args.data_dir, 'train', hparams)
         val_dataset = vars(datasets)[args.dataset](args.data_dir, 'val', hparams)
         test_dataset = vars(datasets)[args.dataset](args.data_dir, 'test', hparams)
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # [NEW] --custom_counts 로 지정된 개수만큼 *train* split 다운샘플링
+        # (도메인 수 × 클래스 수 행렬)
+        # ─────────────────────────────────────────────────────────────────────────
+        if hparams.get('custom_counts'):
+            c_counts = hparams['custom_counts']
+            assert len(c_counts) == len(train_dataset), \
+                f"custom_counts: 도메인 수가 {len(train_dataset)}인데 {len(c_counts)}개가 전달됨"
+
+            for env_i in range(len(train_dataset)):
+                env_ds = train_dataset[env_i]          # 각 도메인의 Dataset
+                keep_per_cls = c_counts[env_i]
+                num_classes = len(keep_per_cls)
+
+                # 라벨 벡터 획득
+                if hasattr(env_ds, "targets"):
+                    labels_np = np.asarray(env_ds.targets).astype(int)
+                elif hasattr(env_ds, "tensors"):
+                    labels_np = env_ds.tensors[1].numpy().astype(int)
+                else:
+                    raise AttributeError("Dataset에 targets 배열이 없습니다.")
+
+                assert num_classes == labels_np.max() + 1, \
+                    "custom_counts 내부 리스트 길이(클래스 수)가 실제 클래스 수와 다릅니다."
+
+                sel_idx = []
+                for cls, n_keep in enumerate(keep_per_cls):
+                    cls_idx = np.where(labels_np == cls)[0]
+                    assert n_keep <= len(cls_idx), \
+                        f"env{env_i}-class{cls}: 요청 {n_keep} > 보유 {len(cls_idx)}"
+                    np.random.shuffle(cls_idx)
+                    sel_idx.extend(cls_idx[:n_keep])
+
+                # 다운샘플 적용
+                train_dataset.datasets[env_i] = SubsetWithTargets(env_ds, sel_idx)
+
     else:
         raise NotImplementedError
 
@@ -219,6 +359,42 @@ if __name__ == "__main__":
     env_ids = args.selected_envs if args.selected_envs is not None else np.arange(len(train_dataset))
 
     print("Dataset:")
+
+    # --------------------------------------------------------------------- #
+    # [새] ① 도메인별 train class 분포 / ② pairwise KL / ③ train-vs-test KL #
+    # --------------------------------------------------------------------- #
+    from mdlt.utils.misc import kl_divergence
+    train_cls_cnt, test_cls_cnt = {}, {}
+
+    header = ['env'] + [f'c{c}' for c in range(num_classes)] + ['total']
+    misc.print_row(header, colwidth=8)
+
+    for i, (tr, _, te) in enumerate(zip(train_dataset, val_dataset, test_dataset)):
+        t_tr = tr.targets if 'Imbalance' not in args.dataset else tr.tensors[1].numpy()
+        t_te = te.targets if 'Imbalance' not in args.dataset else te.tensors[1].numpy()
+        cnt_tr = np.bincount(t_tr, minlength=num_classes)
+        cnt_te = np.bincount(t_te, minlength=num_classes)
+        train_cls_cnt[f'env{env_ids[i]}'] = cnt_tr
+        test_cls_cnt[f'env{env_ids[i]}']  = cnt_te
+
+        misc.print_row([f'env{env_ids[i]}'] + cnt_tr.tolist() + [cnt_tr.sum()], colwidth=8)
+
+    # ――― ① domain 간 KL(train) ―――
+    print("\n[KL(train env_i ‖ train env_j)]")
+    for i in range(len(env_ids)):
+        for j in range(i + 1, len(env_ids)):
+            ei, ej = f'env{env_ids[i]}', f'env{env_ids[j]}'
+            kl = kl_divergence(train_cls_cnt[ei], train_cls_cnt[ej])
+            print(f'{ei} ‖ {ej}: {kl:.4f}')
+
+    # ――― ② train vs test KL per env ―――
+    print("\n[KL(train ‖ test) per env]")
+    for i in range(len(env_ids)):
+        env = f'env{env_ids[i]}'
+        kl = kl_divergence(train_cls_cnt[env], test_cls_cnt[env])
+        print(f'{env}: {kl:.4f}')
+
+
     for i, (tr, va, te) in enumerate(zip(train_dataset, val_dataset, test_dataset)):
         print(f"\tenv{env_ids[i]}:\t{len(tr)}\t|\t{len(va)}\t|\t{len(te)}")
 
@@ -449,8 +625,8 @@ if __name__ == "__main__":
         
     # hyunggyu - for time & gpu_usage logging
     # 경로 설정 (예: ./output/Algo_Dataset_hparamsX_seedY/gpu_summary.txt)
-    resource_log_path = os.path.join(args.output_dir, "resource_summary.txt")
+    # resource_log_path = os.path.join(args.output_dir, "resource_summary.txt")
 
-    # 추적 종료 및 결과 저장
-    tracker.stop()
-    tracker.save(resource_log_path)
+    # # 추적 종료 및 결과 저장
+    # tracker.stop()
+    # tracker.save(resource_log_path)

@@ -36,7 +36,8 @@ ALGORITHMS = [
     'BSoftmax',
     'CRT',
     'BoDA',
-    'KL'
+    # 'KL',
+    'CAWRA_TAROT'
 ]
 
 
@@ -278,17 +279,14 @@ class BoDA(ERM):
         self.boda_start_step = hparams["boda_start_step"]
         self.feat_update_freq = hparams["feat_update_freq"]
 
+        self.use_boda = hparams.get("use_boda", True)
+        self.use_xent = bool(hparams.get("use_xent", True))
+        self.use_calibration = bool(hparams.get("use_calibration", True))
+        self.dist_measure = hparams.get("boda_dist_measure", "coral")
+
         # 'env_labels' can be None in evaluation, but not in training
         if env_labels is not None:
-            # number of samples per domain-class pair
-            # self.n_samples_table = torch.tensor([
-            #     count_samples_per_class(env_labels[env], num_classes) for env in sorted(env_labels)])
-
-            # self.centroid_classes = torch.tensor(np.hstack([np.unique(env_labels[env]) for env in sorted(env_labels)]))
-            # self.centroid_envs = torch.tensor(np.hstack([
-            #     i * np.ones_like(np.unique(env_labels[env])) for i, env in enumerate(sorted(env_labels))]))
-
-            # self.register_buffer('train_centroids', torch.zeros(self.centroid_classes.size(0), self.featurizer.n_outputs))
+            
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.n_samples_table = torch.tensor([
                 count_samples_per_class(env_labels[env], num_classes) for env in sorted(env_labels)]
@@ -305,17 +303,72 @@ class BoDA(ERM):
         return torch.cdist(x, y)
 
     @staticmethod
-    def macro_alignment_loss(x, y):
-        mean_x = x.mean(0, keepdim=True)
-        mean_y = y.mean(0, keepdim=True)
-        cent_x = x - mean_x
-        cent_y = y - mean_y
-        cova_x = (cent_x.t() @ cent_x) / (len(x) - 1)
-        cova_y = (cent_y.t() @ cent_y) / (len(y) - 1)
+    def macro_alignment_loss(self, x, y):
+        # x 또는 y에 샘플이 2개 미만이면 penalty를 0으로 처리하여 계산 자체를 스킵
+        if len(x) < 2 or len(y) < 2:
+            return torch.tensor(0.0, device=x.device)
+        
+        # --boda_dist_measure 인자에 따라 거리 계산 방식 분기
+        if self.dist_measure == 'mahalanobis':
+            # 수치적 안정을 위해 double precision(float64)으로 계산 수행
+            
+            # 원래 dtype과 device 저장
+            orig_dtype = x.dtype
+            
+            # float64로 변환
+            x = x.double()
+            y = y.double()
 
-        mean_diff = (mean_x - mean_y).pow(2).mean()
-        cova_diff = (cova_x - cova_y).pow(2).mean()
-        return mean_diff + cova_diff
+            # --- Mahalanobis Distance (in float64) ---
+            mean_x = x.mean(0)
+            mean_y = y.mean(0)
+            mean_diff = mean_x - mean_y
+
+            # Pooled covariance matrix
+            n_x, n_y = len(x), len(y)
+            cent_x = x - mean_x
+            cent_y = y - mean_y
+            cov_x = (cent_x.t() @ cent_x) / (n_x - 1)
+            cov_y = (cent_y.t() @ cent_y) / (n_y - 1)
+            pooled_cov = ((n_x - 1) * cov_x + (n_y - 1) * cov_y) / (n_x + n_y - 2)
+            
+            # 수치적 안정을 위한 정규화 (Regularization) - 값을 약간 올림
+            d = pooled_cov.shape[0]
+            reg = 1e-4  # 기존 1e-5에서 상향 조정
+            try:
+                # 역행렬 계산
+                inv_pooled_cov = torch.linalg.inv(pooled_cov + torch.eye(d, device=x.device, dtype=torch.float64) * reg)
+            except torch.linalg.LinAlgError:
+                # 역행렬 계산이 불가능한 경우 패널티를 0으로 처리
+                return torch.tensor(0.0, device=x.device)
+
+            # Mahalanobis distance squared: (diff.T) @ (inv_cov) @ (diff)
+            md_sq = mean_diff.view(1, -1) @ inv_pooled_cov @ mean_diff.view(-1, 1)
+            
+            # 최종 penalty 값은 원래 dtype으로 변환
+            penalty = md_sq.squeeze().to(orig_dtype)
+
+        else: # Default: 'coral'
+            # --- Original CORAL-like Distance ---
+            mean_x = x.mean(0, keepdim=True)
+            mean_y = y.mean(0, keepdim=True)
+            mean_diff = (mean_x - mean_y).pow(2).mean()
+
+            cent_x = x - mean_x
+            cent_y = y - mean_y
+            
+            cova_x = (cent_x.t() @ cent_x) / (len(x) - 1)
+            cova_y = (cent_y.t() @ cent_y) / (len(y) - 1)
+            
+            cova_diff = (cova_x - cova_y).pow(2).mean()
+            penalty = mean_diff + cova_diff
+
+        # 계산 결과가 NaN/inf인지 한 번 더 확인
+        if torch.isnan(penalty) or torch.isinf(penalty):
+            return torch.tensor(0.0, device=x.device)
+
+        return penalty
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
     def update_feature_stats(self, env_feats):
         if self.steps == 0 or self.steps % self.feat_update_freq != 0:
@@ -335,80 +388,437 @@ class BoDA(ERM):
         self.train_centroids = \
             (1 - factor) * curr_centroids.to(self.train_centroids.device) + factor * self.train_centroids
 
+    # def update(self, minibatches, env_feats=None):
+    #     self.update_feature_stats(env_feats)
+
+    #     n_envs = len(minibatches)
+    #     all_y = torch.cat([y for _, y in minibatches])
+    #     all_envs = torch.cat([env * torch.ones_like(y) for env, (_, y) in enumerate(minibatches)])
+    #     features = [self.featurizer(xi) for xi, _ in minibatches]
+    #     classifiers = [self.classifier(fi) for fi in features]
+    #     targets = [yi for _, yi in minibatches]
+
+    #     # cross-entropy loss
+    #     loss_x = 0
+    #     for i in range(n_envs):
+    #         loss_x += F.cross_entropy(classifiers[i], targets[i])
+    #     loss_x /= n_envs
+
+    #     # BoDA loss
+    #     if self.steps >= self.boda_start_step:
+    #         pairwise_dist = -1 * self.pairwise_dist(self.train_centroids, torch.cat(features))
+    #         # balanced distance
+    #         n_per_sample = self.n_samples_table[all_envs.long(), all_y.long()]
+    #         # hyunggyu
+    #         # n_per_sample = self.n_samples_table[all_envs.long().cpu(), all_y.long().cpu()]
+    #         logits = torch.div(pairwise_dist, n_per_sample.to(pairwise_dist.device))
+    #         # calibrated distance
+    #         n_samples_numerator = self.n_samples_table[self.centroid_envs.long(), self.centroid_classes.long()]
+    #         n_samples_denominator = self.n_samples_table[all_envs.long(), all_y.long()]
+    #         # hyunggyu
+    #         # n_samples_denominator = self.n_samples_table[all_envs.long().cpu(), all_y.long().cpu()]
+    #         size_h, size_w = n_samples_numerator.size(0), n_samples_denominator.size(0)
+    #         cal_weights = (n_samples_numerator.unsqueeze(1).expand(-1, size_w) /
+    #                        n_samples_denominator.unsqueeze(0).expand(size_h, -1)) ** self.nu
+    #         logits *= cal_weights.to(logits.device)
+    #         logits = torch.div(logits, self.temperature)
+    #         mask_same_d_c = torch.eq(
+    #             self.centroid_classes.contiguous().view(-1, 1).to(all_y.device), all_y.contiguous().view(-1, 1).T).float() * torch.eq(
+    #             self.centroid_envs.contiguous().view(-1, 1).to(all_envs.device), all_envs.contiguous().view(-1, 1).T).float()
+    #         log_prob = logits - torch.log((torch.exp(logits) * (1 - mask_same_d_c)).sum(0, keepdim=True))
+    #         # compute mean of log-likelihood over positive
+    #         mask_cls = torch.eq(self.centroid_classes.contiguous().view(-1, 1).to(all_y.device),
+    #                             all_y.contiguous().view(-1, 1).T).float()
+    #         mask_env = torch.eq(self.centroid_envs.contiguous().view(-1, 1).to(all_envs.device),
+    #                             all_envs.contiguous().view(-1, 1).T).float()
+    #         mask = mask_cls * (1 - mask_env)
+    #         log_prob_pos = log_prob * mask
+    #         loss_b = - log_prob_pos.sum() / mask.sum()
+
+    #     # macro alignment loss
+    #     # during warm-up stage, helps BoDA loss converge
+    #     # in MDLT, brings marginal improvement to BoDA; in DG, helps improve performance
+    #     # to remove, simply set "macro_weight=0" in hparams_registry
+    #     penalty = 0
+    #     for i in range(n_envs):
+    #         for j in range(i + 1, n_envs):
+    #             penalty += self.macro_alignment_loss(features[i], features[j])
+    #     if n_envs > 1:
+    #         penalty /= (n_envs * (n_envs - 1) / 2)
+
+    #     self.optimizer.zero_grad()
+    #     loss = loss_x + self.hparams['macro_weight'] * penalty
+    #     if self.steps >= self.boda_start_step:
+    #         loss += self.hparams['boda_weight'] * loss_b
+    #     loss.backward()
+    #     self.optimizer.step()
+    #     self.steps += 1
+    #     assert not (np.isnan(loss.item()) or loss.item() > 1e5), f"Loss explosion: {loss.item()}"
+
+    #     if torch.is_tensor(penalty):
+    #         penalty = penalty.item()
+
+    #     if self.steps > self.boda_start_step:
+    #         return {'loss': loss_x.item(), 'boda_loss': loss_b.item(), 'penalty': penalty}
+    #     else:
+    #         return {'loss': loss_x.item(), 'penalty': penalty}
+
     def update(self, minibatches, env_feats=None):
+        # ─── feature stats 업데이트 ─────────────────────────────────────────
         self.update_feature_stats(env_feats)
 
+        device = next(self.parameters()).device
         n_envs = len(minibatches)
-        all_y = torch.cat([y for _, y in minibatches])
-        all_envs = torch.cat([env * torch.ones_like(y) for env, (_, y) in enumerate(minibatches)])
-        features = [self.featurizer(xi) for xi, _ in minibatches]
-        classifiers = [self.classifier(fi) for fi in features]
-        targets = [yi for _, yi in minibatches]
 
-        # cross-entropy loss
-        loss_x = 0
-        for i in range(n_envs):
-            loss_x += F.cross_entropy(classifiers[i], targets[i])
-        loss_x /= n_envs
+        # 전체 y, env 지시자(cursor) 벡터
+        all_y    = torch.cat([y for _, y in minibatches])
+        all_envs = torch.cat([env * torch.ones_like(y)
+                              for env, (_, y) in enumerate(minibatches)])
 
-        # BoDA loss
+        # ─── 디버깅 1: 모델 Forward Pass 결과 확인 ────────────────
+        features    = [self.featurizer(x) for x, _ in minibatches]
+        assert not any(torch.isnan(f).any() for f in features), f"NaN detected in features at step {self.steps}"
+        
+        classifiers = [self.classifier(f)   for f in features]
+        classifiers = [torch.clamp(c, min=-100, max=100) for c in classifiers]
+        assert not any(torch.isnan(c).any() for c in classifiers), f"NaN detected in classifiers (logits) at step {self.steps}"
+
+        # ① Cross‐entropy loss
+        if self.use_xent:
+            loss_x = sum(F.cross_entropy(classifiers[i], minibatches[i][1]) for i in range(n_envs)) / n_envs
+        else:
+            loss_x = torch.tensor(0.0, device=device)
+        assert not torch.isnan(loss_x), f"NaN detected in loss_x at step {self.steps}"
+
+        # ② BoDA loss (warm-up 이후 & use_boda=True)
+        if self.steps >= self.boda_start_step and self.use_boda:
+            # 1) pairwise distance
+            pdist = -self.pairwise_dist(self.train_centroids,
+                                        torch.cat(features))
+
+            # 2) balanced distance (분모 clamp)
+            denom_per = self.n_samples_table[all_envs.long(), all_y.long()]\
+                            .clamp_min(1).to(device)
+            logits = pdist / denom_per
+
+            # 3) calibration weights (분모 clamp)
+            n_num = self.n_samples_table[self.centroid_envs.long(),
+                                         self.centroid_classes.long()]\
+                        .clamp_min(1)
+            n_den = self.n_samples_table[all_envs.long(), all_y.long()]\
+                        .clamp_min(1)
+            H, W = n_num.size(0), n_den.size(0)
+            base_w = (n_num.unsqueeze(1).expand(-1, W) /
+                      n_den.unsqueeze(0).expand(H, -1)) ** self.nu
+
+            same_env = (self.centroid_envs.view(-1, 1) ==
+                        all_envs.view(1, -1))
+            gamma    = self.hparams.get("cross_env_gamma", 1.0)
+            cross_w  = torch.where(same_env, 1.0, gamma)
+            cal_w    = base_w * cross_w
+
+            if self.use_calibration:
+                logits = logits * cal_w.to(device)
+
+            # 4) temperature scaling
+            logits = logits / self.temperature
+
+            # 5) log-prob 계산
+            mask_same = (self.centroid_classes.view(-1, 1) == 
+                         all_y.view(1, -1)) & same_env
+            log_prob = logits - torch.log(
+                (torch.exp(logits) * (~mask_same)).sum(0, keepdim=True)
+                + 1e-12
+            )
+
+            # 6) positive-pair mask
+            mask_cls = (self.centroid_classes.view(-1, 1) == 
+                        all_y.view(1, -1))
+            pos_mask = mask_cls & (~same_env)
+            lp_pos   = log_prob * pos_mask.float()
+
+            # 7) denom 방어
+            cnt_pos = pos_mask.sum()
+            if cnt_pos > 0:
+                loss_b = - lp_pos.sum() / cnt_pos
+            else:
+                loss_b = torch.tensor(0.0, device=device)
+        else:
+            loss_b = torch.tensor(0.0, device=device)
+        assert not torch.isnan(loss_b), f"NaN detected in loss_b at step {self.steps}"
+
+
+        # ③ Macro alignment penalty (warm-up 이후에만)
         if self.steps >= self.boda_start_step:
-            pairwise_dist = -1 * self.pairwise_dist(self.train_centroids, torch.cat(features))
-            # balanced distance
-            n_per_sample = self.n_samples_table[all_envs.long(), all_y.long()]
-            # hyunggyu
-            # n_per_sample = self.n_samples_table[all_envs.long().cpu(), all_y.long().cpu()]
-            logits = torch.div(pairwise_dist, n_per_sample.to(pairwise_dist.device))
-            # calibrated distance
-            n_samples_numerator = self.n_samples_table[self.centroid_envs.long(), self.centroid_classes.long()]
-            n_samples_denominator = self.n_samples_table[all_envs.long(), all_y.long()]
-            # hyunggyu
-            # n_samples_denominator = self.n_samples_table[all_envs.long().cpu(), all_y.long().cpu()]
-            size_h, size_w = n_samples_numerator.size(0), n_samples_denominator.size(0)
-            cal_weights = (n_samples_numerator.unsqueeze(1).expand(-1, size_w) /
-                           n_samples_denominator.unsqueeze(0).expand(size_h, -1)) ** self.nu
-            logits *= cal_weights.to(logits.device)
-            logits = torch.div(logits, self.temperature)
-            mask_same_d_c = torch.eq(
-                self.centroid_classes.contiguous().view(-1, 1).to(all_y.device), all_y.contiguous().view(-1, 1).T).float() * torch.eq(
-                self.centroid_envs.contiguous().view(-1, 1).to(all_envs.device), all_envs.contiguous().view(-1, 1).T).float()
-            log_prob = logits - torch.log((torch.exp(logits) * (1 - mask_same_d_c)).sum(0, keepdim=True))
-            # compute mean of log-likelihood over positive
-            mask_cls = torch.eq(self.centroid_classes.contiguous().view(-1, 1).to(all_y.device),
-                                all_y.contiguous().view(-1, 1).T).float()
-            mask_env = torch.eq(self.centroid_envs.contiguous().view(-1, 1).to(all_envs.device),
-                                all_envs.contiguous().view(-1, 1).T).float()
-            mask = mask_cls * (1 - mask_env)
-            log_prob_pos = log_prob * mask
-            loss_b = - log_prob_pos.sum() / mask.sum()
+            penalty = 0.0
+            for i in range(n_envs):
+                for j in range(i+1, n_envs):
+                    # ========================= [ 코드 수정 시작 ] =========================
+                    # penalty 값에 log1p를 적용하여 스케일을 안정화시킵니다.
+                    penalty += torch.log1p(self.macro_alignment_loss(
+                        features[i], features[j]))
+                    # ========================= [  코드 수정 끝  ] =========================
+            if n_envs > 1:
+                penalty = penalty / (n_envs*(n_envs-1)/2)
 
-        # macro alignment loss
-        # during warm-up stage, helps BoDA loss converge
-        # in MDLT, brings marginal improvement to BoDA; in DG, helps improve performance
-        # to remove, simply set "macro_weight=0" in hparams_registry
-        penalty = 0
-        for i in range(n_envs):
-            for j in range(i + 1, n_envs):
-                penalty += self.macro_alignment_loss(features[i], features[j])
-        if n_envs > 1:
-            penalty /= (n_envs * (n_envs - 1) / 2)
+        else:
+            penalty = torch.tensor(0.0, device=device)
+        assert not torch.isnan(penalty), f"NaN detected in penalty at step {self.steps}"
 
+
+        # ④ Global imbalance loss: global_weight > 0 인 경우에만 계산
+        device = next(self.parameters()).device
+        gw = self.hparams.get('global_weight', 0.0)
+        if gw > 0:
+            eps = 1e-8
+            
+            # 1. Calculate target distribution q safely
+            global_counts = self.n_samples_table.sum(dim=0).float()
+            total_samples = global_counts.sum()
+            
+            if total_samples > 0:
+                q = global_counts / total_samples
+            else:
+                # If no samples, use a uniform distribution as a fallback
+                num_classes = self.classifier.out_features
+                q = torch.full((num_classes,), 1.0 / num_classes, device=device)
+
+            # 2. Calculate predicted distribution p_bar safely
+            all_logits = torch.cat(classifiers, dim=0)
+            # 수정 코드: log_softmax를 통해 수치적으로 안정하게 softmax 계산
+            log_probs = F.log_softmax(all_logits, dim=1)
+            probs = torch.exp(log_probs)
+            p_bar = probs.mean(dim=0)
+
+            # 3. Calculate KL divergence robustly
+            # --- 안전한 KL 계산 ------------------------------------
+            p_bar = p_bar.clamp_min(eps)
+            # 0 확률은 그대로 두고 음수만 방어
+            q = q.clamp_min(0)
+
+            mask = q > 0
+            if mask.any():
+                p_sel = p_bar[mask]
+                q_sel = q[mask]
+
+                p_sel = p_sel / p_sel.sum()
+                q_sel = q_sel / q_sel.sum()
+
+                global_loss = torch.sum(q_sel * (q_sel.log() - p_sel.log()))
+            else:
+                global_loss = torch.tensor(0.0, device=device)
+
+        else:
+            # global_weight == 0이면 loss에 0 곱해지도록 0으로 처리
+            global_loss = torch.tensor(0.0, device=device)
+        assert not torch.isnan(global_loss), f"NaN detected in global_loss at step {self.steps}"
+
+        # ⑤ 최종 loss 조합
+        macro_w = self.hparams['macro_weight'] if self.steps >= self.boda_start_step else 0.0
+        loss = (
+            loss_x
+            + macro_w * penalty
+            + self.hparams['boda_weight'] * loss_b
+            + self.hparams.get('global_weight', 0.0) * global_loss
+        )
+        assert not torch.isnan(loss), f"NaN detected in final loss at step {self.steps}"
+
+
+        # (디버깅용 NaN 체크 — 필요시 활성화)
+        for name, v in [('loss_x',loss_x),('loss_b',loss_b),
+                       ('penalty',penalty),('global',global_loss)]:
+            if torch.isnan(v):
+                print(f"NaN in {name} at step {self.steps}")
+
+        # ─── backward & step ───────────────────────────────────────────────
+        torch.autograd.set_detect_anomaly(True)  # anomaly detection
         self.optimizer.zero_grad()
-        loss = loss_x + self.hparams['macro_weight'] * penalty
-        if self.steps >= self.boda_start_step:
-            loss += self.hparams['boda_weight'] * loss_b
         loss.backward()
+
+        # Gradient Clipping
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+
+
         self.optimizer.step()
         self.steps += 1
+
         assert not (np.isnan(loss.item()) or loss.item() > 1e5), f"Loss explosion: {loss.item()}"
 
-        if torch.is_tensor(penalty):
-            penalty = penalty.item()
+        # ─── 반환값 ────────────────────────────────────────────────────────
+        out = {'loss': loss_x.item(), 'penalty': float(penalty)}
+        if self.steps > self.boda_start_step and self.use_boda:
+            out['boda_loss'] = loss_b.item()
+        return out
+    
 
-        if self.steps > self.boda_start_step:
-            return {'loss': loss_x.item(), 'boda_loss': loss_b.item(), 'penalty': penalty}
+class CAWRA_TAROT(BoDA):
+    """
+    CAWRA-TAROT: Class-distribution-Aware Weighted Robust Adaptation
+    BoDA를 기반으로 TAROT의 적대적 강건성과 CAWRA의 클래스 가중치 보정 아이디어를 통합합니다.
+    """
+    def __init__(self, input_shape, num_classes, num_domains, hparams, env_labels=None):
+        # [CAWRA-TAROT] 부모 클래스(BoDA)의 __init__을 먼저 호출합니다.
+        super(CAWRA_TAROT, self).__init__(input_shape, num_classes, num_domains, hparams, env_labels)
+
+        # [CAWRA-TAROT] 적대적 학습(Adversarial Training) 파라미터를 추가합니다.
+        self.pgd_eps = hparams.get("pgd_eps", 8.0 / 255.0)
+        self.pgd_alpha = hparams.get("pgd_alpha", 2.0 / 255.0)
+        self.pgd_steps = hparams.get("pgd_steps", 10)
+
+        # [CAWRA-TAROT] CAWRA 가중치를 계산합니다.
+        if env_labels is not None:
+            # 가중치 beta_{d,c} = (c 클래스의 다른 도메인 평균 샘플 수) / (d 도메인의 c 클래스 샘플 수)
+            counts = self.n_samples_table.float().clamp_min(1.0) # 0으로 나누는 것을 방지
+            total_counts_per_class = counts.sum(dim=0)
+            
+            # (전체 합 - 자기 자신) / (도메인 수 - 1)
+            avg_counts_other_domains = (total_counts_per_class.unsqueeze(0) - counts) / (num_domains - 1)
+            # 0으로 나누는 것을 방지하기 위해 분모가 0일 경우 분자도 0으로 만들어 0/0 -> nan 대신 0이 되게 함
+            avg_counts_other_domains[counts == 0] = 0
+
+            self.cawra_weights = avg_counts_other_domains / counts
+            self.cawra_weights[torch.isnan(self.cawra_weights)] = 1.0 # 0/0 -> nan을 1로 처리
+            self.cawra_weights = self.cawra_weights.clamp_max(hparams.get("cawra_clip", 10.0))
+            
+            print("--- CAWRA Weights Initialized ---")
+            print(self.cawra_weights)
+            print("---------------------------------")
+
+
+    def pgd_attack(self, images, labels):
+        """[CAWRA-TAROT] PGD 공격을 수행하여 적대적 예제를 생성하는 함수"""
+        images_adv = images.clone().detach().requires_grad_(True)
+        loss_fn = nn.CrossEntropyLoss()
+
+        for _ in range(self.pgd_steps):
+            outputs = self.network(images_adv)
+            self.network.zero_grad()
+            loss = loss_fn(outputs, labels)
+            loss.backward()
+
+            attack_grad = images_adv.grad.sign()
+            images_adv = images_adv.detach() + self.pgd_alpha * attack_grad
+            total_noise = torch.clamp(images_adv - images, -self.pgd_eps, self.pgd_eps)
+            images_adv = torch.clamp(images + total_noise, 0, 1).detach().requires_grad_(True)
+            
+        return images_adv.detach()
+
+    def forward(self, x):
+        """
+        모델 객체가 함수처럼 호출될 때 실행되는 정방향 연산을 정의합니다.
+        'self.network'는 ERM 클래스에서 정의된 전체 모델 (featurizer + classifier)입니다.
+        """
+        return self.network(x)
+
+    def update(self, minibatches, env_feats=None):
+        device = minibatches[0][0].device
+        
+        # ─── 1. 적대적 예제 생성 (TAROT 파트) ────────────────────────────────
+        all_x = torch.cat([x for x, y in minibatches])
+        all_y_orig = torch.cat([y for x, y in minibatches])
+        
+        with torch.no_grad():
+            pseudo_logits = self(all_x)
+            pseudo_labels = pseudo_logits.argmax(dim=1)
+        
+        all_x_adv = self.pgd_attack(all_x, pseudo_labels)
+
+        # 도메인별로 적대적 예제를 다시 분리
+        adv_minibatches = []
+        start_idx = 0
+        for x, y in minibatches:
+            end_idx = start_idx + len(x)
+            adv_minibatches.append((all_x_adv[start_idx:end_idx], y))
+            start_idx = end_idx
+
+        # ─── 2. 피쳐 추출 및 손실 계산 (BoDA, CAWRA 파트) ──────────────────
+        if env_feats:
+            self.update_feature_stats(env_feats)
+        
+        n_envs = len(minibatches)
+        all_envs = torch.cat([env * torch.ones_like(y) for env, (_, y) in enumerate(minibatches)])
+
+        # '적대적 예제'로부터 피쳐와 로짓을 계산
+        features = [self.featurizer(x_adv) for x_adv, _ in adv_minibatches]
+        classifiers = [self.classifier(f) for f in features]
+        all_logits = torch.cat(classifiers)
+
+        # ① [CAWRA-TAROT] 가중치가 적용된 Cross‐entropy loss
+        if self.use_xent:
+            per_sample_loss_x = F.cross_entropy(all_logits, all_y_orig, reduction='none')
+            weights = self.cawra_weights[all_envs.long(), all_y_orig.long()].to(device)
+            loss_x = (per_sample_loss_x * weights).mean()
         else:
-            return {'loss': loss_x.item(), 'penalty': penalty}
+            loss_x = torch.tensor(0.0, device=device)
+
+        # ② BoDA loss (입력 피쳐가 적대적 피쳐임)
+        loss_b = torch.tensor(0.0, device=device)
+        if self.steps >= self.boda_start_step and self.use_boda:
+            pdist = -self.pairwise_dist(self.train_centroids, torch.cat(features))
+            denom_per = self.n_samples_table[all_envs.long(), all_y_orig.long()].clamp_min(1).to(device)
+            logits = pdist / denom_per
+            
+            n_num = self.n_samples_table[self.centroid_envs.long(), self.centroid_classes.long()].clamp_min(1)
+            n_den = self.n_samples_table[all_envs.long(), all_y_orig.long()].clamp_min(1)
+            H, W = n_num.size(0), n_den.size(0)
+            base_w = (n_num.unsqueeze(1).expand(-1, W) / n_den.unsqueeze(0).expand(H, -1)) ** self.nu
+            same_env = (self.centroid_envs.view(-1, 1) == all_envs.view(1, -1))
+            gamma = self.hparams.get("cross_env_gamma", 1.0)
+            cross_w = torch.where(same_env, 1.0, gamma)
+            cal_w = base_w * cross_w
+            if self.use_calibration:
+                logits = logits * cal_w.to(device)
+
+            logits = logits / self.temperature
+            mask_same = (self.centroid_classes.view(-1, 1) == all_y_orig.view(1, -1)) & same_env
+            log_prob = logits - torch.log((torch.exp(logits) * (~mask_same)).sum(0, keepdim=True) + 1e-12)
+            mask_cls = (self.centroid_classes.view(-1, 1) == all_y_orig.view(1, -1))
+            pos_mask = mask_cls & (~same_env)
+            lp_pos = log_prob * pos_mask.float()
+            
+            cnt_pos = pos_mask.sum()
+            if cnt_pos > 0:
+                loss_b = -lp_pos.sum() / cnt_pos
+
+        # ③ Macro alignment penalty (입력 피쳐가 적대적 피쳐임)
+        penalty = torch.tensor(0.0, device=device)
+        if self.steps >= self.boda_start_step:
+            current_penalty = 0.0
+            for i in range(n_envs):
+                for j in range(i + 1, n_envs):
+                    current_penalty += torch.log1p(self.macro_alignment_loss(features[i], features[j]))
+            if n_envs > 1:
+                penalty = current_penalty / (n_envs * (n_envs - 1) / 2)
+        
+        # ④ [CAWRA-TAROT] 타겟 도메인 강건성 손실 추가
+        target_adv_loss = F.cross_entropy(all_logits, pseudo_labels)
+
+        # ⑤ 최종 loss 조합
+        macro_w = self.hparams['macro_weight'] if self.steps >= self.boda_start_step else 0.0
+        boda_w = self.hparams['boda_weight']
+        target_adv_w = self.hparams.get('target_adv_weight', 1.0) # 새로운 하이퍼파라미터
+
+        loss = (
+            loss_x  # CAWRA 가중치 적용됨
+            + macro_w * penalty
+            + boda_w * loss_b
+            + target_adv_w * target_adv_loss # TAROT 강건성 항 추가
+        )
+
+        # ─── backward & step ───────────────────────────────────────────────
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        self.optimizer.step()
+        self.steps += 1
+
+        return {
+            'loss': loss.item(), 
+            'loss_x_weighted': loss_x.item(), 
+            'loss_boda': loss_b.item(), 
+            'penalty_macro': penalty.item(), 
+            'loss_target_adv': target_adv_loss.item()
+        }
 
 
 class Fish(Algorithm):
@@ -992,99 +1402,99 @@ class SagNet(Algorithm):
         return self.network_c(self.network_f(x))
 
 
-class KL(Algorithm):
-    """
-    KL
-    """
+# class KL(Algorithm):
+#     """
+#     KL
+#     """
 
-    def __init__(self, input_shape, num_classes, num_domains, hparams, env_labels=None):
-        super(KL, self).__init__(input_shape, num_classes, num_domains, hparams, env_labels)
+#     def __init__(self, input_shape, num_classes, num_domains, hparams, env_labels=None):
+#         super(KL, self).__init__(input_shape, num_classes, num_domains, hparams, env_labels)
 
-        self.featurizer = networks.Featurizer(input_shape, self.hparams, probabilistic=True)
-        self.classifier = networks.Classifier(
-            self.featurizer.n_outputs,
-            num_classes,
-            self.hparams['nonlinear_classifier'])
+#         self.featurizer = networks.Featurizer(input_shape, self.hparams, probabilistic=True)
+#         self.classifier = networks.Classifier(
+#             self.featurizer.n_outputs,
+#             num_classes,
+#             self.hparams['nonlinear_classifier'])
 
-        cls_lr = 100*self.hparams["lr"] if hparams['nonlinear_classifier'] else self.hparams["lr"]
+#         cls_lr = 100*self.hparams["lr"] if hparams['nonlinear_classifier'] else self.hparams["lr"]
 
 
-        self.optimizer = torch.optim.Adam(
-            #list(self.featurizer.parameters()) + list(self.classifier.parameters()),
-            [{'params': self.featurizer.parameters(), 'lr': self.hparams["lr"]},
-                {'params': self.classifier.parameters(), 'lr': cls_lr}],
-            lr=self.hparams["lr"],
-            weight_decay=self.hparams['weight_decay']
-        )
-        self.num_samples = hparams['num_samples']
-        self.kl_reg = hparams['kl_reg']
-        self.kl_reg_aux = hparams['kl_reg_aux']
-        self.augment_softmax = hparams['augment_softmax']
+#         self.optimizer = torch.optim.Adam(
+#             #list(self.featurizer.parameters()) + list(self.classifier.parameters()),
+#             [{'params': self.featurizer.parameters(), 'lr': self.hparams["lr"]},
+#                 {'params': self.classifier.parameters(), 'lr': cls_lr}],
+#             lr=self.hparams["lr"],
+#             weight_decay=self.hparams['weight_decay']
+#         )
+#         self.num_samples = hparams['num_samples']
+#         self.kl_reg = hparams['kl_reg']
+#         self.kl_reg_aux = hparams['kl_reg_aux']
+#         self.augment_softmax = hparams['augment_softmax']
 
-    def update(self, minibatches, unlabeled=None):
+#     def update(self, minibatches, unlabeled=None):
 
-        x = torch.cat([x for x,y in minibatches])
-        y = torch.cat([y for x,y in minibatches])
+#         x = torch.cat([x for x,y in minibatches])
+#         y = torch.cat([y for x,y in minibatches])
 
-        x_target = torch.cat(list(unlabeled.values()))
-        # x_target = torch.cat(unlabeled)
+#         x_target = torch.cat(list(unlabeled.values()))
+#         # x_target = torch.cat(unlabeled)
 
-        total_x = torch.cat([x,x_target])
-        total_z_params = self.featurizer(total_x)
-        z_dim = int(total_z_params.shape[-1]/2)
-        total_z_mu = total_z_params[:,:z_dim]
-        total_z_sigma = F.softplus(total_z_params[:,z_dim:]) 
+#         total_x = torch.cat([x,x_target])
+#         total_z_params = self.featurizer(total_x)
+#         z_dim = int(total_z_params.shape[-1]/2)
+#         total_z_mu = total_z_params[:,:z_dim]
+#         total_z_sigma = F.softplus(total_z_params[:,z_dim:]) 
 
-        z_mu, z_sigma = total_z_mu[:x.shape[0]], total_z_sigma[:x.shape[0]]
-        z_mu_target, z_sigma_target = total_z_mu[x.shape[0]:], total_z_sigma[x.shape[0]:]
+#         z_mu, z_sigma = total_z_mu[:x.shape[0]], total_z_sigma[:x.shape[0]]
+#         z_mu_target, z_sigma_target = total_z_mu[x.shape[0]:], total_z_sigma[x.shape[0]:]
 
-        z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
-        z = z_dist.rsample()
+#         z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
+#         z = z_dist.rsample()
 
-        z_dist_target = dist.Independent(dist.normal.Normal(z_mu_target,z_sigma_target),1)
-        z_target = z_dist_target.rsample()
+#         z_dist_target = dist.Independent(dist.normal.Normal(z_mu_target,z_sigma_target),1)
+#         z_target = z_dist_target.rsample()
 
-        preds = torch.softmax(self.classifier(z),1)
-        if self.augment_softmax != 0.0:
-            K = 1 - self.augment_softmax * preds.shape[1]
-            preds = preds*K + self.augment_softmax
-        loss = F.nll_loss(torch.log(preds),y) 
+#         preds = torch.softmax(self.classifier(z),1)
+#         if self.augment_softmax != 0.0:
+#             K = 1 - self.augment_softmax * preds.shape[1]
+#             preds = preds*K + self.augment_softmax
+#         loss = F.nll_loss(torch.log(preds),y) 
 
-        mix_coeff = dist.categorical.Categorical(x.new_ones(x.shape[0]))
-        mixture = dist.mixture_same_family.MixtureSameFamily(mix_coeff,z_dist)
-        mix_coeff_target = dist.categorical.Categorical(x_target.new_ones(x_target.shape[0]))
-        mixture_target = dist.mixture_same_family.MixtureSameFamily(mix_coeff_target,z_dist_target)
+#         mix_coeff = dist.categorical.Categorical(x.new_ones(x.shape[0]))
+#         mixture = dist.mixture_same_family.MixtureSameFamily(mix_coeff,z_dist)
+#         mix_coeff_target = dist.categorical.Categorical(x_target.new_ones(x_target.shape[0]))
+#         mixture_target = dist.mixture_same_family.MixtureSameFamily(mix_coeff_target,z_dist_target)
         
-        obj = loss
-        kl = loss.new_zeros([])
-        kl_aux = loss.new_zeros([])
-        if self.kl_reg != 0.0:
-            kl = (mixture_target.log_prob(z_target)-mixture.log_prob(z_target)).mean()
-            obj = obj + self.kl_reg*kl
-        if self.kl_reg_aux != 0.0:
-            kl_aux = (mixture.log_prob(z)-mixture_target.log_prob(z)).mean()
-            obj = obj + self.kl_reg_aux*kl_aux
+#         obj = loss
+#         kl = loss.new_zeros([])
+#         kl_aux = loss.new_zeros([])
+#         if self.kl_reg != 0.0:
+#             kl = (mixture_target.log_prob(z_target)-mixture.log_prob(z_target)).mean()
+#             obj = obj + self.kl_reg*kl
+#         if self.kl_reg_aux != 0.0:
+#             kl_aux = (mixture.log_prob(z)-mixture_target.log_prob(z)).mean()
+#             obj = obj + self.kl_reg_aux*kl_aux
 
-        self.optimizer.zero_grad()
-        obj.backward()
-        self.optimizer.step()
+#         self.optimizer.zero_grad()
+#         obj.backward()
+#         self.optimizer.step()
 
-        return {'loss': loss.item(), 'kl': kl.item(), 'kl_aux': kl_aux.item()}
+#         return {'loss': loss.item(), 'kl': kl.item(), 'kl_aux': kl_aux.item()}
 
-    def predict(self, x):
-        z_params = self.featurizer(x)
-        z_dim = int(z_params.shape[-1]/2)
-        z_mu = z_params[:,:z_dim]
-        z_sigma = F.softplus(z_params[:,z_dim:]) 
+#     def predict(self, x):
+#         z_params = self.featurizer(x)
+#         z_dim = int(z_params.shape[-1]/2)
+#         z_mu = z_params[:,:z_dim]
+#         z_sigma = F.softplus(z_params[:,z_dim:]) 
 
-        z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
+#         z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
         
-        preds = 0.0
-        for s in range(self.num_samples):
-            z = z_dist.rsample()
-            preds += F.softmax(self.classifier(z),1)
-        preds = preds/self.num_samples
+#         preds = 0.0
+#         for s in range(self.num_samples):
+#             z = z_dist.rsample()
+#             preds += F.softmax(self.classifier(z),1)
+#         preds = preds/self.num_samples
 
-        K = 1 - 0.05 * preds.shape[1]
-        preds = preds*K + 0.05
-        return preds
+#         K = 1 - 0.05 * preds.shape[1]
+#         preds = preds*K + 0.05
+#         return preds

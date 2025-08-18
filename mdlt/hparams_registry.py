@@ -41,6 +41,8 @@ def _hparams(algorithm, dataset, random_seed):
     # Each block of code below corresponds to exactly one algorithm
 
     if 'BoDA' in algorithm:
+        # scuttie: BoDA hyperparameters
+        _hparam('cross_env_gamma', 1.5, lambda r: 1.0)
         if dataset == 'DomainNet':
             _hparam('boda_start_step', 3000, lambda r: int(1000 * r.choice(range(2, 6))))
             _hparam('feat_update_freq', 2000, lambda r: int(10 * r.uniform(150, 300)))
@@ -83,6 +85,34 @@ def _hparams(algorithm, dataset, random_seed):
         _hparam('irm_lambda', 1e2, lambda r: 10**r.uniform(-1, 5))
         _hparam('irm_penalty_anneal_iters', 500, lambda r: int(10**r.uniform(0, 4)))
 
+
+    # CAWRA_TAROT 알고리즘을 위한 하이퍼파라미터 정의
+    elif algorithm == 'CAWRA_TAROT':
+        # BoDA와 동일한 기본 하이퍼파라미터 사용
+        _hparam('cross_env_gamma', 1.5, lambda r: 1.0)
+        if dataset == 'DomainNet':
+            _hparam('boda_start_step', 3000, lambda r: int(1000 * r.choice(range(2, 6))))
+            _hparam('feat_update_freq', 2000, lambda r: int(10 * r.uniform(150, 300)))
+        else:
+            _hparam('boda_start_step', 500, lambda r: int(100 * r.choice(range(3, 7))))
+            _hparam('feat_update_freq', 120, lambda r: int(r.uniform(100, 150)))
+        _hparam('nu', 0.5, lambda r: 10**r.uniform(-0.5, 0))
+        _hparam('boda_weight', .1, lambda r: 10**r.uniform(-2, -0.5))
+        _hparam('temperature', 1., lambda r: 10**r.uniform(-1, 0.5))
+        _hparam('macro_weight', 1., lambda r: 10**r.uniform(-1, 1))
+        _hparam('momentum', .2, lambda r: r.uniform(0, 0.4))
+
+        # --- CAWRA-TAROT 고유 하이퍼파라미터 ---
+        # CAWRA 파트
+        _hparam('cawra_clip', 10.0, lambda r: r.uniform(5.0, 15.0))
+        
+        # TAROT 파트
+        _hparam('target_adv_weight', 1.0, lambda r: 10**r.uniform(-1, 1))
+        _hparam('pgd_eps', 8.0/255.0, lambda r: r.choice([4.0, 8.0, 16.0]) / 255.0)
+        _hparam('pgd_alpha', 2.0/255.0, lambda r: (2.0 / 255.0))
+        _hparam('pgd_steps', 10, lambda r: r.choice([7, 10]))
+    # ================= [  수정 끝  ] =================
+
     elif "Mixup" in algorithm:
         _hparam('mixup_alpha', 0.2, lambda r: 10**r.uniform(-1, -1))
 
@@ -98,11 +128,11 @@ def _hparams(algorithm, dataset, random_seed):
     elif algorithm == "MTL":
         _hparam('mtl_ema', .99, lambda r: r.choice([0.5, 0.9, 0.99, 1.]))
 
-    elif algorithm == "KL":
-        _hparam('num_samples', 10, lambda r: int(r.uniform(5, 20)))
-        _hparam('kl_reg', 1.0, lambda r: 10**r.uniform(-2, 1))
-        _hparam('kl_reg_aux', 1.0, lambda r: 10**r.uniform(-2, 1))
-        _hparam('augment_softmax', 0.05, lambda r: r.uniform(0.01, 0.1))
+    # elif algorithm == "KL":
+    #     _hparam('num_samples', 10, lambda r: int(r.uniform(5, 20)))
+    #     _hparam('kl_reg', 1.0, lambda r: 10**r.uniform(-2, 1))
+    #     _hparam('kl_reg_aux', 1.0, lambda r: 10**r.uniform(-2, 1))
+    #     _hparam('augment_softmax', 0.05, lambda r: r.uniform(0.01, 0.1))
 
 
     # Dataset-and-algorithm-specific hparam definitions
