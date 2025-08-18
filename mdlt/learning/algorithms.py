@@ -5,8 +5,13 @@ import torch.autograd as autograd
 import copy
 import numpy as np
 
+# for KL
+import torch.distributions as dist
+
 from mdlt.models import networks
 from mdlt.utils.misc import count_samples_per_class, random_pairs_of_minibatches, ParamDict
+
+
 
 
 ALGORITHMS = [
@@ -30,7 +35,8 @@ ALGORITHMS = [
     'LDAM',
     'BSoftmax',
     'CRT',
-    'BoDA'
+    'BoDA',
+    'KL'
 ]
 
 
@@ -984,3 +990,101 @@ class SagNet(Algorithm):
 
     def predict(self, x):
         return self.network_c(self.network_f(x))
+
+
+class KL(Algorithm):
+    """
+    KL
+    """
+
+    def __init__(self, input_shape, num_classes, num_domains, hparams, env_labels=None):
+        super(KL, self).__init__(input_shape, num_classes, num_domains, hparams, env_labels)
+
+        self.featurizer = networks.Featurizer(input_shape, self.hparams, probabilistic=True)
+        self.classifier = networks.Classifier(
+            self.featurizer.n_outputs,
+            num_classes,
+            self.hparams['nonlinear_classifier'])
+
+        cls_lr = 100*self.hparams["lr"] if hparams['nonlinear_classifier'] else self.hparams["lr"]
+
+
+        self.optimizer = torch.optim.Adam(
+            #list(self.featurizer.parameters()) + list(self.classifier.parameters()),
+            [{'params': self.featurizer.parameters(), 'lr': self.hparams["lr"]},
+                {'params': self.classifier.parameters(), 'lr': cls_lr}],
+            lr=self.hparams["lr"],
+            weight_decay=self.hparams['weight_decay']
+        )
+        self.num_samples = hparams['num_samples']
+        self.kl_reg = hparams['kl_reg']
+        self.kl_reg_aux = hparams['kl_reg_aux']
+        self.augment_softmax = hparams['augment_softmax']
+
+    def update(self, minibatches, unlabeled=None):
+
+        x = torch.cat([x for x,y in minibatches])
+        y = torch.cat([y for x,y in minibatches])
+
+        x_target = torch.cat(list(unlabeled.values()))
+        # x_target = torch.cat(unlabeled)
+
+        total_x = torch.cat([x,x_target])
+        total_z_params = self.featurizer(total_x)
+        z_dim = int(total_z_params.shape[-1]/2)
+        total_z_mu = total_z_params[:,:z_dim]
+        total_z_sigma = F.softplus(total_z_params[:,z_dim:]) 
+
+        z_mu, z_sigma = total_z_mu[:x.shape[0]], total_z_sigma[:x.shape[0]]
+        z_mu_target, z_sigma_target = total_z_mu[x.shape[0]:], total_z_sigma[x.shape[0]:]
+
+        z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
+        z = z_dist.rsample()
+
+        z_dist_target = dist.Independent(dist.normal.Normal(z_mu_target,z_sigma_target),1)
+        z_target = z_dist_target.rsample()
+
+        preds = torch.softmax(self.classifier(z),1)
+        if self.augment_softmax != 0.0:
+            K = 1 - self.augment_softmax * preds.shape[1]
+            preds = preds*K + self.augment_softmax
+        loss = F.nll_loss(torch.log(preds),y) 
+
+        mix_coeff = dist.categorical.Categorical(x.new_ones(x.shape[0]))
+        mixture = dist.mixture_same_family.MixtureSameFamily(mix_coeff,z_dist)
+        mix_coeff_target = dist.categorical.Categorical(x_target.new_ones(x_target.shape[0]))
+        mixture_target = dist.mixture_same_family.MixtureSameFamily(mix_coeff_target,z_dist_target)
+        
+        obj = loss
+        kl = loss.new_zeros([])
+        kl_aux = loss.new_zeros([])
+        if self.kl_reg != 0.0:
+            kl = (mixture_target.log_prob(z_target)-mixture.log_prob(z_target)).mean()
+            obj = obj + self.kl_reg*kl
+        if self.kl_reg_aux != 0.0:
+            kl_aux = (mixture.log_prob(z)-mixture_target.log_prob(z)).mean()
+            obj = obj + self.kl_reg_aux*kl_aux
+
+        self.optimizer.zero_grad()
+        obj.backward()
+        self.optimizer.step()
+
+        return {'loss': loss.item(), 'kl': kl.item(), 'kl_aux': kl_aux.item()}
+
+    def predict(self, x):
+        z_params = self.featurizer(x)
+        z_dim = int(z_params.shape[-1]/2)
+        z_mu = z_params[:,:z_dim]
+        z_sigma = F.softplus(z_params[:,z_dim:]) 
+
+        z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
+        
+        preds = 0.0
+        for s in range(self.num_samples):
+            z = z_dist.rsample()
+            preds += F.softmax(self.classifier(z),1)
+        preds = preds/self.num_samples
+
+        K = 1 - 0.05 * preds.shape[1]
+        preds = preds*K + 0.05
+        return preds

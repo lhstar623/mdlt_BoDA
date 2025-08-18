@@ -32,7 +32,9 @@ def multi_gpu_launcher(commands):
             if (proc is None) or (proc.poll() is not None):
                 # Nothing is running on this GPU; launch a command.
                 cmd = commands.pop(0)
-                new_proc = subprocess.Popen(f'CUDA_VISIBLE_DEVICES={gpu_idx} {cmd}', shell=True)
+                # new_proc = subprocess.Popen(f'CUDA_VISIBLE_DEVICES={gpu_idx} {cmd}', shell=True)
+                # hyunggyu - bash used -> for time & GPU_usage Logging
+                new_proc = subprocess.Popen(f'CUDA_VISIBLE_DEVICES={gpu_idx} {cmd}', shell=True, executable="/bin/bash")
                 procs_by_gpu[gpu_idx] = new_proc
                 break
         time.sleep(1)

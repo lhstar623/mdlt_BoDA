@@ -1,6 +1,7 @@
 output/
 mdlt/sh/
 mdlt/slurm_logs/
+slurm_logs_time/
 
 # Byte-compiled / optimized / DLL files
 .idea/*

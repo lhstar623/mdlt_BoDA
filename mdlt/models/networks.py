@@ -44,14 +44,18 @@ class Identity(nn.Module):
 
 class MLP(nn.Module):
     """Just  an MLP"""
-    def __init__(self, n_inputs, n_outputs, hparams):
+    def __init__(self, n_inputs, n_outputs, hparams,  probabilistic=False):
         super(MLP, self).__init__()
         self.input = nn.Linear(n_inputs, hparams['mlp_width'])
         self.dropout = nn.Dropout(hparams['mlp_dropout'])
         self.hiddens = nn.ModuleList([
             nn.Linear(hparams['mlp_width'], hparams['mlp_width'])
             for _ in range(hparams['mlp_depth']-2)])
-        self.output = nn.Linear(hparams['mlp_width'], n_outputs)
+        # for KL
+        if probabilistic:
+            self.output = nn.Linear(hparams['mlp_width'], n_outputs*2)
+        else:
+            self.output = nn.Linear(hparams['mlp_width'], n_outputs)
         self.n_outputs = n_outputs
 
     def forward(self, x):
@@ -68,14 +72,24 @@ class MLP(nn.Module):
 
 class ResNet(torch.nn.Module):
     """ResNet with the softmax chopped off and the batchnorm frozen"""
-    def __init__(self, input_shape, hparams):
+    def __init__(self, input_shape, hparams, probabilistic=False):
         super(ResNet, self).__init__()
         if hparams['resnet18']:
             self.network = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
             self.n_outputs = 512
+            # for KL
+            if probabilistic:
+                self.network.fc = nn.Linear(self.network.fc.in_features,self.n_outputs*2)
+            else:
+                self.network.fc = nn.Linear(self.network.fc.in_features,self.n_outputs)
         else:
             self.network = torchvision.models.resnet50(weights=ResNet50_Weights.DEFAULT)
             self.n_outputs = 2048
+            # for KL
+            if probabilistic:
+                self.network.fc = nn.Linear(self.network.fc.in_features,self.n_outputs*2)
+            else:
+                self.network.fc = nn.Linear(self.network.fc.in_features,self.n_outputs)
 
         # self.network = remove_batch_norm_from_resnet(self.network)
 
@@ -125,8 +139,9 @@ class MNIST_CNN(nn.Module):
     """
     n_outputs = 128
 
-    def __init__(self, input_shape):
+    def __init__(self, input_shape, probabilistic=False):
         super(MNIST_CNN, self).__init__()
+        last_dim = 128*2 if probabilistic else 128
         self.conv1 = nn.Conv2d(input_shape[0], 64, 3, 1, padding=1)
         self.conv2 = nn.Conv2d(64, 128, 3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(128, 128, 3, 1, padding=1)
@@ -135,7 +150,7 @@ class MNIST_CNN(nn.Module):
         self.bn0 = nn.GroupNorm(8, 64)
         self.bn1 = nn.GroupNorm(8, 128)
         self.bn2 = nn.GroupNorm(8, 128)
-        self.bn3 = nn.GroupNorm(8, 128)
+        self.bn3 = nn.GroupNorm(8, last_dim)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
@@ -162,7 +177,7 @@ class MNIST_CNN(nn.Module):
 
 
 class ContextNet(nn.Module):
-    def __init__(self, input_shape):
+    def __init__(self, input_shape, probabilistic=False):
         super(ContextNet, self).__init__()
 
         # Keep same dimensions
@@ -181,16 +196,16 @@ class ContextNet(nn.Module):
         return self.context_net(x)
 
 
-def Featurizer(input_shape, hparams):
+def Featurizer(input_shape, hparams, probabilistic=False):
     """Auto-select an appropriate featurizer for the given input shape."""
     if len(input_shape) == 1:
-        return MLP(input_shape[0], hparams["mlp_width"], hparams)
+        return MLP(input_shape[0], hparams["mlp_width"], hparams, probabilistic=probabilistic)
     elif input_shape[1:3] == (28, 28):
-        return MNIST_CNN(input_shape)
+        return MNIST_CNN(input_shape, probabilistic=probabilistic)
     elif input_shape[1:3] == (32, 32):
-        return wide_resnet.WideResNet(input_shape, 16, 2, 0.)
+        return wide_resnet.WideResNet(input_shape, 16, 2, 0., probabilistic=probabilistic)
     elif input_shape[1:3] == (224, 224):
-        return ResNet(input_shape, hparams)
+        return ResNet(input_shape, hparams, probabilistic=probabilistic)
     else:
         raise NotImplementedError
 

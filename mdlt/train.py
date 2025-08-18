@@ -19,8 +19,103 @@ from mdlt.learning import algorithms
 from mdlt.utils import misc
 from mdlt.dataset.fast_dataloader import InfiniteDataLoader, FastDataLoader
 
+# hyunggyu - for time &  c/gpu usage logging
+import pynvml
+import psutil
+import threading
+import time
+
+class ResourceTracker:
+    def __init__(self, device_index=0, interval=1):
+        self.device_index = device_index
+        self.interval = interval
+        self._stop_event = threading.Event()
+
+        # GPU 통계
+        self.gpu_min = float('inf')
+        self.gpu_max = float('-inf')
+        self.gpu_sum = 0
+        self.gpu_count = 0
+
+        self.mem_min = float('inf')
+        self.mem_max = float('-inf')
+        self.mem_sum = 0
+        self.mem_count = 0
+
+        # CPU 메모리 (RSS, MB)
+        self.cpu_min = float('inf')
+        self.cpu_max = float('-inf')
+        self.cpu_sum = 0
+        self.cpu_count = 0
+
+        self.start_time = None
+        self.end_time = None
+
+    def _track(self):
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+        process = psutil.Process()
+
+        self.start_time = time.time()
+
+        while not self._stop_event.is_set():
+            # GPU
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            gpu = util.gpu
+            mem_used = mem.used / 1024 / 1024
+
+            self.gpu_min = min(self.gpu_min, gpu)
+            self.gpu_max = max(self.gpu_max, gpu)
+            self.gpu_sum += gpu
+            self.gpu_count += 1
+
+            self.mem_min = min(self.mem_min, mem_used)
+            self.mem_max = max(self.mem_max, mem_used)
+            self.mem_sum += mem_used
+            self.mem_count += 1
+
+            # CPU
+            rss_used = process.memory_info().rss / 1024 / 1024  # MB
+            self.cpu_min = min(self.cpu_min, rss_used)
+            self.cpu_max = max(self.cpu_max, rss_used)
+            self.cpu_sum += rss_used
+            self.cpu_count += 1
+
+            time.sleep(self.interval)
+
+        self.end_time = time.time()
+        pynvml.nvmlShutdown()
+
+    def start(self):
+        self.thread = threading.Thread(target=self._track)
+        self.thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self.thread.join()
+
+    def save(self, path):
+        gpu_avg = self.gpu_sum / self.gpu_count if self.gpu_count else 0
+        mem_avg = self.mem_sum / self.mem_count if self.mem_count else 0
+        cpu_avg = self.cpu_sum / self.cpu_count if self.cpu_count else 0
+        duration = self.end_time - self.start_time if self.end_time and self.start_time else 0
+
+        with open(path, 'w') as f:
+            f.write(f"Tracking Duration (sec): {duration:.2f}\n")
+            f.write(f"GPU Utilization (%): min={self.gpu_min}, max={self.gpu_max}, avg={gpu_avg:.2f}\n")
+            f.write(f"GPU Memory Usage (MiB): min={self.mem_min:.0f}, max={self.mem_max:.0f}, avg={mem_avg:.2f}\n")
+            f.write(f"CPU Memory Usage (MiB): min={self.cpu_min:.0f}, max={self.cpu_max:.0f}, avg={cpu_avg:.2f}\n")
+
+
 
 if __name__ == "__main__":
+    
+    
+    # 1. 추적 시작
+    tracker = ResourceTracker(interval=5)
+    tracker.start()
+    
     parser = argparse.ArgumentParser(description='Multi-Domain LT')
     # training
     parser.add_argument('--dataset', type=str, default="PACS", choices=datasets.DATASETS)
@@ -350,3 +445,12 @@ if __name__ == "__main__":
 
     with open(os.path.join(args.output_dir, 'done'), 'w') as f:
         f.write('done')
+        
+        
+    # hyunggyu - for time & gpu_usage logging
+    # 경로 설정 (예: ./output/Algo_Dataset_hparamsX_seedY/gpu_summary.txt)
+    resource_log_path = os.path.join(args.output_dir, "resource_summary.txt")
+
+    # 추적 종료 및 결과 저장
+    tracker.stop()
+    tracker.save(resource_log_path)

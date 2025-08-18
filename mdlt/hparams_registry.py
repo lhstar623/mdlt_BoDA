@@ -98,6 +98,13 @@ def _hparams(algorithm, dataset, random_seed):
     elif algorithm == "MTL":
         _hparam('mtl_ema', .99, lambda r: r.choice([0.5, 0.9, 0.99, 1.]))
 
+    elif algorithm == "KL":
+        _hparam('num_samples', 10, lambda r: int(r.uniform(5, 20)))
+        _hparam('kl_reg', 1.0, lambda r: 10**r.uniform(-2, 1))
+        _hparam('kl_reg_aux', 1.0, lambda r: 10**r.uniform(-2, 1))
+        _hparam('augment_softmax', 0.05, lambda r: r.uniform(0.01, 0.1))
+
+
     # Dataset-and-algorithm-specific hparam definitions
     # Each block of code below corresponds to exactly one hparam. Avoid nested conditionals
 
