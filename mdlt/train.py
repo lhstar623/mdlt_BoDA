@@ -450,8 +450,12 @@ if __name__ == "__main__":
         args.pretrained = os.path.join(
             args.output_dir.replace(args.output_folder_name, args.stage1_folder), hparams['stage1_model']
         ).replace(args.algorithm, args.stage1_algo)
+        print(args.pretrained)
+        
         args.pretrained = args.pretrained.replace(
             f"seed{args.pretrained[args.pretrained.find('seed') + len('seed')]}", 'seed0')
+        print(args.pretrained)
+        
         assert os.path.isfile(args.pretrained)
 
     if args.pretrained:

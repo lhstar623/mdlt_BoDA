@@ -283,7 +283,7 @@ class BoDA(ERM):
         self.use_xent = bool(hparams.get("use_xent", True))
         self.use_calibration = bool(hparams.get("use_calibration", True))
         self.dist_measure = hparams.get("boda_dist_measure", "coral")
-
+        # self.dist_measure = 'mahalanobis'
         # 'env_labels' can be None in evaluation, but not in training
         if env_labels is not None:
             
@@ -302,7 +302,6 @@ class BoDA(ERM):
     def pairwise_dist(x, y):
         return torch.cdist(x, y)
 
-    @staticmethod
     def macro_alignment_loss(self, x, y):
         # x 또는 y에 샘플이 2개 미만이면 penalty를 0으로 처리하여 계산 자체를 스킵
         if len(x) < 2 or len(y) < 2:

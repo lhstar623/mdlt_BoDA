@@ -44,8 +44,8 @@ def num_environments(dataset_name):
 class MultipleDomainDataset:
     N_STEPS = 5001           # Default, subclasses may override
     CHECKPOINT_FREQ = 100    # Default, subclasses may override
-    N_WORKERS = 6            # Default, subclasses may override
-    # N_WORKERS = 8            # Default, subclasses may override
+    # N_WORKERS = 6            # Default, subclasses may override
+    N_WORKERS = 8            # Default, subclasses may override
     MANY_SHOT_THRES = 100    # Default, subclasses may override
     FEW_SHOT_THRES = 20      # Default, subclasses may override
     ENVIRONMENTS = None      # Subclasses should override
@@ -131,7 +131,7 @@ class MNISTM(VisionDataset):
 
 class ImbalancedMultipleEnvironmentMNIST(MultipleDomainDataset):
     def __init__(self, root, split, environments, dataset_transform, input_shape, num_classes,
-                 imb_type_per_env, imb_factor=0.1, rand_seed=0):
+                 hparams, imb_type_per_env, imb_factor=0.1, rand_seed=0):
         super().__init__()
         np.random.seed(rand_seed)
         torch.manual_seed(rand_seed)
@@ -173,11 +173,21 @@ class ImbalancedMultipleEnvironmentMNIST(MultipleDomainDataset):
         self.input_shape = input_shape
         self.num_classes = num_classes
         self.datasets = []
+        
 
         for i in range(len(environments)):
             images = original_images[i::len(environments)]
             labels = original_labels[i::len(environments)]
             if split == 'train':
+                # ---------------- NEW: custom_counts 최우선 ---------------- #
+                if hparams.get('custom_counts') is not None:
+                    img_num_list = hparams['custom_counts'][i]
+                    assert len(img_num_list) == num_classes, \
+                        "custom_counts: (#class) mismatch"
+                else:
+                    img_max = 1000
+                    img_num_list = self.get_img_num_per_cls(num_classes, img_max, imb_type_per_env[i], imb_factor)
+
                 img_max = 1000
                 img_num_list = self.get_img_num_per_cls(num_classes, img_max, imb_type_per_env[i], imb_factor)
             else:
@@ -246,6 +256,7 @@ class ImbalancedColoredMNIST(ImbalancedMultipleEnvironmentMNIST):
         self.vis = vis
         super(ImbalancedColoredMNIST, self).__init__(
             root, split, [0, 1, 2, 3], self.color_dataset, (3, 28, 28,), 10,
+            hparams, # hparams 전달
             hparams['imb_type_per_env'], hparams['imb_factor'], hparams['rand_seed'])
 
     def color_dataset(self, images, labels, environment):
@@ -280,6 +291,7 @@ class ImbalancedRotatedMNIST(ImbalancedMultipleEnvironmentMNIST):
         self.vis = vis
         super(ImbalancedRotatedMNIST, self).__init__(
             root, split, [0, 30, 60], self.rotate_dataset, (1, 28, 28,), 10,
+            hparams, # hparams 전달
             hparams['imb_type_per_env'], hparams['imb_factor'], hparams['rand_seed'])
 
     def rotate_dataset(self, images, labels, angle):
@@ -338,6 +350,16 @@ class ImbalancedDigits(MultipleDomainDataset):
 
             if split == 'train':
                 images, labels = images_tr, labels_tr
+
+                # ---------------- NEW: custom_counts 최우선 ---------------- #
+                if hparams.get('custom_counts') is not None:
+                    img_num_list = hparams['custom_counts'][i]
+                    assert len(img_num_list) == num_classes
+                else:
+                    img_max = 1000
+                    img_num_list = self.get_img_num_per_cls(
+                        num_classes, img_max, hparams['imb_type_per_env'][i], hparams['imb_factor'])
+
                 img_max = 1000
                 img_num_list = self.get_img_num_per_cls(
                     num_classes, img_max, hparams['imb_type_per_env'][i], hparams['imb_factor'])
@@ -491,9 +513,15 @@ class VLCS(MultipleEnvironmentImageFolder):
     MANY_SHOT_THRES = 100
     FEW_SHOT_THRES = 20
 
+    # If the environment variable ``MDLT_CSV_SUFFIX`` is set, the dataset will
+    # load ``VLCS${MDLT_CSV_SUFFIX}.csv`` instead of the default CSV.
+
     def __init__(self, root, split, hparams):
         self.dir = os.path.join(root, "VLCS")
-        self.df = pd.read_csv(os.path.join(self.dir, "VLCS.csv"))
+        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
+        csv_name = f"VLCS{csv_suffix}.csv"
+        self.df = pd.read_csv(os.path.join(self.dir, csv_name))
+        # self.df = pd.read_csv(os.path.join(self.dir, "VLCS.csv"))
         # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/VLCS.csv")
         super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
 
@@ -503,10 +531,51 @@ class PACS(MultipleEnvironmentImageFolder):
     MANY_SHOT_THRES = 100
     FEW_SHOT_THRES = 20
 
+    # Use ``MDLT_CSV_SUFFIX`` to select ``PACS${MDLT_CSV_SUFFIX}.csv``
+
     def __init__(self, root, split, hparams):
-        self.dir = os.path.join(root, "PACS")
-        self.df = pd.read_csv(os.path.join(self.dir, "PACS.csv"))
-        # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/PACS.csv")
+        # (1) 인자로 받은 data_dir 를 절대경로로 확정
+        root = os.path.abspath(os.path.expanduser(root))
+
+        # ------------------------------------------------------------
+        # (2) CSV 파일 위치 탐색
+        # ------------------------------------------------------------
+        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
+        csv_name   = f"PACS{csv_suffix}.csv"
+
+
+        csv_candidates = [
+            os.path.join(root, "PACS", csv_name),                           # 일반적인 위치: <data_dir>/PACS/<csv>
+            os.path.join(root, "split", csv_name)                          # <data_dir>/split/<csv>
+            # "/home/jewonyeom/mdlt_BoDA/mdlt/dataset/split/PACS.csv",        # 사용자 맞춤 fallback
+        ]
+        try:
+            csv_path = next(p for p in csv_candidates if os.path.isfile(p))
+        except StopIteration:
+            raise FileNotFoundError(
+                "PACS CSV 파일을 찾을 수 없습니다.\n"
+                "다음 위치를 확인했습니다:\n  " + "\n  ".join(csv_candidates)
+            )
+        self.df = pd.read_csv(csv_path)
+
+        # ------------------------------------------------------------
+        # (3) 이미지 디렉터리 위치 탐색
+        # ------------------------------------------------------------
+        img_dir_candidates = [
+            os.path.join(root, "PACS"),                        # <data_dir>/PACS
+            os.path.join(os.path.dirname(csv_path), "..", "PACS"),  # CSV 옆에 PACS 폴더
+        ]
+        try:
+            self.dir = next(d for d in img_dir_candidates if os.path.isdir(d))
+        except StopIteration:
+            raise FileNotFoundError(
+                "PACS 이미지 디렉터리를 찾을 수 없습니다.\n"
+                "다음 위치를 확인했습니다:\n  " + "\n  ".join(img_dir_candidates) +
+                "\n--data_dir 옵션을 올바른 경로로 지정했는지 확인하세요."
+            )
+        # self.dir = os.path.join(root, "PACS")
+        # self.df = pd.read_csv(os.path.join(self.dir, "PACS.csv"))
+        # # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/PACS.csv")
         super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
 
 
@@ -517,9 +586,13 @@ class DomainNet(MultipleEnvironmentImageFolder):
     MANY_SHOT_THRES = 100
     FEW_SHOT_THRES = 20
 
+    # When ``MDLT_CSV_SUFFIX`` is set, ``DomainNet${MDLT_CSV_SUFFIX}.csv`` is used
     def __init__(self, root, split, hparams):
         self.dir = os.path.join(root, "domain_net")
-        self.df = pd.read_csv(os.path.join(self.dir, "DomainNet.csv"))
+        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
+        csv_name = f"DomainNet{csv_suffix}.csv"
+        self.df = pd.read_csv(os.path.join(self.dir, csv_name))
+        # self.df = pd.read_csv(os.path.join(self.dir, "DomainNet.csv"))
         # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/DomainNet.csv")
 
         super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
@@ -530,9 +603,15 @@ class OfficeHome(MultipleEnvironmentImageFolder):
     MANY_SHOT_THRES = 60
     FEW_SHOT_THRES = 20
 
+    # Load ``OfficeHome${MDLT_CSV_SUFFIX}.csv`` when the environment variable is set
+
+
     def __init__(self, root, split, hparams):
         self.dir = os.path.join(root, "office_home")
-        self.df = pd.read_csv(os.path.join(self.dir, "OfficeHome.csv"))
+        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
+        csv_name = f"OfficeHome{csv_suffix}.csv"
+        self.df = pd.read_csv(os.path.join(self.dir, csv_name))
+        # self.df = pd.read_csv(os.path.join(self.dir, "OfficeHome.csv"))
         # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/OfficeHome.csv")
         
         super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
@@ -543,8 +622,14 @@ class TerraIncognita(MultipleEnvironmentImageFolder):
     MANY_SHOT_THRES = 100
     FEW_SHOT_THRES = 25
 
+    # ``MDLT_CSV_SUFFIX`` selects ``TerraIncognita${MDLT_CSV_SUFFIX}.csv``
+
+
     def __init__(self, root, split, hparams):
         self.dir = os.path.join(root, "terra_incognita")
-        self.df = pd.read_csv(os.path.join(self.dir, "TerraIncognita.csv"))
+        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
+        csv_name = f"TerraIncognita{csv_suffix}.csv"
+        self.df = pd.read_csv(os.path.join(self.dir, csv_name))
+        # self.df = pd.read_csv(os.path.join(self.dir, "TerraIncognita.csv"))
         # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/TerraIncognita.csv")
         super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)

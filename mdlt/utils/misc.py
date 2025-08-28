@@ -11,6 +11,20 @@ from numbers import Number
 from sklearn.metrics import confusion_matrix
 
 
+# --------------------------------------------------------------------------- #
+# New: KL‑divergence for discrete class distributions                         #
+# --------------------------------------------------------------------------- #
+def kl_divergence(p_counts, q_counts, eps: float = 1e-12) -> float:
+    """
+    Symmetric‑safe KL(P‖Q) where P,Q는 '샘플 개수' 벡터.
+    1) smoothing(=eps) 후 정규화, 2) Σ p·log(p/q).
+    """
+    p = np.asarray(p_counts, dtype=np.float64) + eps
+    q = np.asarray(q_counts, dtype=np.float64) + eps
+    p /= p.sum()
+    q /= q.sum()
+    return float(np.sum(p * np.log(p / q)))
+
 IMBALANCE_TYPE = {
     'b': 'balance',
     'e': 'exp',

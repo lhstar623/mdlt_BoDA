@@ -1,55 +1,14 @@
 #!/bin/bash
 
-#SBATCH --job-name=MDLT_KL_PACS
-#SBATCH --partition=laal_a6000
+#SBATCH --job-name=sweep_BoDA_1stage_PACS
+#SBATCH --partition=laal_3090
 #SBATCH --nodes=1    
 #SBATCH --gres=gpu:1
 #SBATCH --mem=50GB
 #SBATCH --cpus-per-task=5
-#SBATCH --output=./slurm_logs_time/S-%x.%j.out     
+#SBATCH --output=./slurm_logs/S-%x.%j.out     
 
 cd /home/hyunggyu/imbalance/multi-domain-imbalance
-
-#!/bin/bash
-#SBATCH --job-name=CAWRA_TAROT_run_BoDA
-#SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --mem=50GB
-#SBATCH --partition=laal_3090
-#SBATCH --time=UNLIMITED
-# --- :톱니바퀴: 설정: 여기에 실행할 데이터셋 목록을 추가하세요 ---
-# "DomainNet" "OfficeHome" "TerraIncognita" "VLCS" "PACS"
-DATASETS=("PACS" "VLCS" "TerraIncognita" "OfficeHome" "DomainNet")
-# --- 공통 경로 설정 ---
-DATA_DIR="/home/shared"
-BASE_OUTPUT_DIR="./output"
-# --- 반복문 시작 ---
-for dataset in "${DATASETS[@]}"; do
-    echo "================================================="
-    echo ":로켓: Starting CAWRA_TAROT training for dataset: ${dataset}"
-    echo "================================================="
-    # :흰색_확인_표시: 각 데이터셋에 대한 파이썬 스크립트 실행
-    #    --algorithm을 CAWRA_TAROT으로 변경하고 관련 인자들을 추가합니다.
-    python -m mdlt.train \
-      --dataset "${dataset}" \
-      --algorithm CAWRA_TAROT \
-      --output_folder_name "CAWRA_TAROT_${dataset}" \
-      --data_dir "${DATA_DIR}" \
-      --output_dir "${BASE_OUTPUT_DIR}" \
-      --seed 0 \
-      --use_boda True \
-      --use_calibration True \
-      --use_xent True \
-      --boda_dist_measure "mahalanobis" \
-      --macro_weight 1.0 \
-      --target_adv_weight 1.0 \
-      --pgd_eps 8.0
-    echo ":흰색_확인_표시: Finished training for dataset: ${dataset}"
-    echo "-------------------------------------------------"
-    echo ""
-done
-echo ":짠: All dataset runs are complete."
-
 
 # nvidia-smi
 
@@ -82,16 +41,32 @@ echo ":짠: All dataset runs are complete."
 #   --hparams '{"resnet18": true}' \
 #   --skip_confirmation
 
-# # ALG별 SWEEP 실행
-# python -m mdlt.sweep launch \
-#   --output_folder_name sweep_KL \
-#   --algorithms 'KL' \
+# ALG별 SWEEP 실행
+# python -m mdlt.train \
+#   --output_folder_name all_mahal_BoDA_1stage \
+#   --algorithm 'BoDA' \
 #   --data_dir /home/shared \
-#   --dataset PACS \
 #   --output_dir ./output \
-#   --hparams '{"resnet18": true}' \
-#   --n_hparams 1 \
-#   --skip_confirmation
+#   --boda_dist_measure "mahalanobis" \
+
+# python -m mdlt.train \
+#   --algorithm CRT \
+#   --dataset PACS \
+#   --output_folder_name sweep_PACS_BoDA_mahal_1stage_mulSeed \
+#   --data_dir /home/shared \
+#   --output_dir ./output \
+#   --stage1_folder ./PACS_mahal_1stage \
+#   --stage1_algo 'BoDA' \
+#   --boda_dist_measure "mahalanobis" \
+
+# MDLD_TIME1
+python -m mdlt.sweep launch \
+  --output_folder_name  sweep_PACS_BoDA_mahal_1stage_mulSeed \
+  --algorithms 'BoDA' \
+  --data_dir /home/shared \
+  --dataset PACS \
+  --output_dir ./output \
+  --skip_confirmation \
 
 # MDLD_TIME1
 # python -m mdlt.sweep launch \
