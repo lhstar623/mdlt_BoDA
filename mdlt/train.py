@@ -19,11 +19,14 @@ from mdlt.learning import algorithms
 from mdlt.utils import misc
 from mdlt.dataset.fast_dataloader import InfiniteDataLoader, FastDataLoader
 
+from mdlt.dataset.tally_boda_integration import TallyDatasetWrapper, TallySampler
+from torch.utils.data import DataLoader
+
 # hyunggyu - for time &  c/gpu usage logging
-import pynvml
-import psutil
-import threading
-import time
+# import pynvml
+# import psutil
+# import threading
+# import time
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SubsetWithTargets: torch.utils.data.Subset 에 .targets 속성까지 복사
@@ -344,6 +347,12 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
 
+    # --- [ TALLY 통합 코드 추가 시작 ] ---
+    if args.algorithm == 'TALLYAlgorithm':
+        # BoDA 데이터셋을 TallyDatasetWrapper로 감싸기
+        train_dataset_wrapped = TallyDatasetWrapper(train_dataset, hparams)
+    # --- [ TALLY 통합 코드 추가 끝 ] ---   
+
     num_workers = train_dataset.N_WORKERS
     input_shape = train_dataset.input_shape
     num_classes = train_dataset.num_classes
@@ -417,13 +426,47 @@ if __name__ == "__main__":
         test_splits.append((env_test, test_weights))
         train_labels[f"env{env_ids[i]}"] = env_train.targets if 'Imbalance' not in args.dataset else env_train.tensors[1].numpy()
 
-    train_loaders = [InfiniteDataLoader(
-        dataset=env,
-        weights=env_weights,
-        batch_size=hparams['batch_size'],
-        num_workers=num_workers)
-        for env, env_weights in train_splits
-    ]
+    # --- [ TALLY 통합 코드 수정 시작 ] ---
+    if args.algorithm == 'TALLYAlgorithm':
+        # TALLY는 warmup과 train 단계에서 다른 로더/이터레이터를 사용합니다.
+        train_loader_warmup = DataLoader(
+            dataset=train_dataset_wrapped,
+            batch_size=hparams['batch_size'],
+            num_workers=num_workers,
+            shuffle=True,
+            pin_memory=True
+        )
+        
+        # iter_num은 한 epoch당 step 수와 유사한 개념입니다.
+        steps_per_epoch = len(train_dataset_wrapped) // hparams['batch_size']
+        tally_sampler = TallySampler(
+            train_dataset_wrapped, 
+            batch_size=hparams['batch_size'] // 2, 
+            iter_num=steps_per_epoch
+        )
+        train_loader_tally = DataLoader(
+            dataset=train_dataset_wrapped,
+            batch_size=hparams['batch_size'], # sampler가 2 * (batch_size/2) 만큼 인덱스를 반환
+            num_workers=num_workers,
+            sampler=tally_sampler,
+            pin_memory=True
+        )
+        
+        # 학습 루프에서 사용할 수 있도록 이터레이터로 변환
+        warmup_iterator = iter(train_loader_warmup)
+        tally_iterator = iter(train_loader_tally)
+
+    else: # 다른 모든 알고리즘은 기존 방식 사용
+        train_loaders = [InfiniteDataLoader(
+            dataset=env,
+            weights=env_weights,
+            batch_size=hparams['batch_size'],
+            num_workers=num_workers)
+            for env, env_weights in train_splits
+        ]
+        train_minibatches_iterator = zip(*train_loaders)
+    # --- [ TALLY 통합 코드 수정 끝 ] ---
+
     eval_loaders = [FastDataLoader(
         dataset=env,
         batch_size=64,
@@ -443,7 +486,21 @@ if __name__ == "__main__":
     feat_loader_names = [f'env{env_ids[i]}' for i in range(len(train_splits))]
 
     algorithm_class = algorithms.get_algorithm_class(args.algorithm)
-    algorithm = algorithm_class(input_shape, num_classes, len(train_dataset), hparams, env_labels=train_labels)
+
+    # --- [ 수정 시작 ] ---
+    if args.algorithm == 'TALLYAlgorithm':
+        # TALLYDataset은 여러 도메인을 포함하는 단일 객체일 수 있음
+        # train_dataset.datasets는 각 도메인별 Subset 리스트
+        # TALLY의 update_statistics는 통합된 데이터셋 객체에서 호출되어야 함
+        # 프로젝트의 dataset 구성에 따라 train_dataset 또는 train_dataset.raw_dataset 등을 넘겨야 할 수 있음
+        algorithm = algorithm_class(
+            input_shape, num_classes, len(train_dataset), hparams, train_dataset=train_dataset_wrapped
+        )
+    else: # 기존 로직
+        algorithm = algorithm_class(
+            input_shape, num_classes, len(train_dataset), hparams, env_labels=train_labels
+        )
+    # --- [ 수정 끝 ] ---
 
     # load stage1 model if using 2-stage algorithm
     if 'CRT' in args.algorithm:
@@ -482,7 +539,7 @@ if __name__ == "__main__":
 
     algorithm.to(device)
 
-    train_minibatches_iterator = zip(*train_loaders)
+    # train_minibatches_iterator = zip(*train_loaders)
     checkpoint_vals = collections.defaultdict(lambda: [])
 
     steps_per_epoch = min([len(env)/hparams['batch_size'] for env, _ in train_splits])
@@ -508,8 +565,33 @@ if __name__ == "__main__":
     last_results_keys = None
     for step in range(start_step, n_steps):
         step_start_time = time.time()
-        minibatches_device = [(x.to(device), y.to(device))
-                              for x, y in next(train_minibatches_iterator)]
+
+        # --- [ TALLY 통합 수정 ] ---
+        # 알고리즘에 따라 배치를 가져오는 방식을 다르게 합니다.
+        if args.algorithm == 'TALLYAlgorithm':
+            warmup_steps = hparams.get('warmup_steps', 2000)
+            
+            try:
+                if step < warmup_steps:
+                    minibatch_tuple = next(warmup_iterator)
+                else:
+                    minibatch_tuple = next(tally_iterator)
+            except StopIteration:
+                # 이터레이터가 끝나면 새로 만듭니다.
+                if step < warmup_steps:
+                    warmup_iterator = iter(train_loader_warmup)
+                    minibatch_tuple = next(warmup_iterator)
+                else:
+                    tally_iterator = iter(train_loader_tally)
+                    minibatch_tuple = next(tally_iterator)
+            
+            # TALLY는 7개 항목을 포함하는 단일 튜플 배치를 처리합니다.
+            minibatches_device = tuple(tensor.to(device) for tensor in minibatch_tuple)
+        else:
+            # 다른 알고리즘들은 각 도메인에서 온 (x, y) 튜플의 리스트를 처리합니다.
+            minibatches_device = [(x.to(device), y.to(device))
+                                  for x, y in next(train_minibatches_iterator)]
+        # --- [ TALLY 통합 수정 끝 ] ---
 
         # update features before training step
         train_features = {}
@@ -526,6 +608,16 @@ if __name__ == "__main__":
             train_features = {'feats': curr_tr_feats, 'labels': curr_tr_labels}
 
         algorithm.train()
+
+        # algorithm.update 호출 부분 수정
+        if args.algorithm == 'TALLYAlgorithm':
+            # TALLYAlgorithm.update는 단일 튜플 배치를 처리하도록 설계됨
+            step_vals = algorithm.update(minibatches_device, train_features)
+        else:
+            # 다른 알고리즘들은 배치들의 리스트를 처리
+            step_vals = algorithm.update(minibatches_device, train_features) # 이 부분은 기존 코드와 맞게 조정 필요
+
+
         step_vals = algorithm.update(minibatches_device, train_features)
         checkpoint_vals['step_time'].append(time.time() - step_start_time)
 

@@ -5,14 +5,14 @@ import torch.autograd as autograd
 import copy
 import numpy as np
 
-# for KL
-import torch.distributions as dist
-
 from mdlt.models import networks
 from mdlt.utils.misc import count_samples_per_class, random_pairs_of_minibatches, ParamDict
 
-
-
+# TALLY 모델 및 관련 모듈 import
+from mdlt.learning.TALLY.tally  import TALLY as TALLY_Model
+from mdlt.learning.TALLY.tally  import AdaIN, calculate_statistics
+# TALLY 데이터셋 클래스 import (경로는 실제 프로젝트 구조에 맞게 조정 필요)
+from mdlt.learning.TALLY.dataset import IWildCam, PACS, VLCS, OfficeHome, DomainNet, TerraIncognita
 
 ALGORITHMS = [
     'ERM',
@@ -36,8 +36,9 @@ ALGORITHMS = [
     'BSoftmax',
     'CRT',
     'BoDA',
-    # 'KL',
-    'CAWRA_TAROT'
+    'LODO_DA_MAML',
+    'CAWRA_TAROT',
+    'TALLYAlgorithm'
 ]
 
 
@@ -283,6 +284,7 @@ class BoDA(ERM):
         self.use_xent = bool(hparams.get("use_xent", True))
         self.use_calibration = bool(hparams.get("use_calibration", True))
         self.dist_measure = hparams.get("boda_dist_measure", "coral")
+        # Set boda_measure to 'mahalanobis' for Mahalanobis distance (ON/OFF)
         # self.dist_measure = 'mahalanobis'
         # 'env_labels' can be None in evaluation, but not in training
         if env_labels is not None:
@@ -1401,99 +1403,259 @@ class SagNet(Algorithm):
         return self.network_c(self.network_f(x))
 
 
-# class KL(Algorithm):
-#     """
-#     KL
-#     """
+class LODO_DA_MAML(Algorithm):
+    def __init__(self, input_shape, num_classes, num_domains, hparams, env_labels=None):
+        super(LODO_DA_MAML, self).__init__(input_shape, num_classes, num_domains, hparams)
+        self.featurizer = networks.Featurizer(input_shape, self.hparams)
+        self.classifier = networks.Classifier(
+            self.featurizer.n_outputs,
+            num_classes,
+            self.hparams['nonlinear_classifier'])
+        all_params = list(self.featurizer.parameters()) + list(self.classifier.parameters())
+        self.optimizer = torch.optim.Adam(
+            all_params,
+            lr=self.hparams["meta_lr"],
+            weight_decay=self.hparams['weight_decay']
+        )
+        if env_labels is not None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.n_samples_table = torch.tensor([
+                count_samples_per_class(env_labels[env], num_classes) for env in sorted(env_labels)]
+            ).to(device)
+        else:
+            self.n_samples_table = torch.ones(num_domains, num_classes)
+    @staticmethod
+    def _pairwise_l2_distance(x, y):
+        x_norm = x.pow(2).sum(dim=-1, keepdim=True)
+        y_norm = y.pow(2).sum(dim=-1, keepdim=True)
+        inner_prod = torch.mm(x, y.t())
+        dist_sq = x_norm - 2 * inner_prod + y_norm.t()
+        dist = torch.sqrt(dist_sq.clamp_min(1e-12))
+        return dist
+    def _compute_centroids(self, source_minibatches_with_indices):
+        all_features, all_labels, all_domains = [], [], []
+        with torch.no_grad():
+            for domain_idx, (x, y) in source_minibatches_with_indices:
+                features = self.featurizer(x)
+                features = F.normalize(features, p=2, dim=1)
+                all_features.append(features)
+                all_labels.append(y)
+                all_domains.append(torch.full_like(y, domain_idx))
+        all_features = torch.cat(all_features)
+        all_labels = torch.cat(all_labels)
+        all_domains = torch.cat(all_domains)
+        unique_domain_classes = torch.unique(torch.stack([all_domains, all_labels], dim=1), dim=0)
+        centroids = torch.zeros(len(unique_domain_classes), all_features.shape[1], device=all_features.device)
+        for i, (d, c) in enumerate(unique_domain_classes):
+            mask = (all_domains == d) & (all_labels == c)
+            if mask.sum() > 0:
+                centroids[i] = all_features[mask].mean(dim=0)
+        return centroids, unique_domain_classes
+    def _compute_da_loss(self, features, labels, domains, centroids, centroid_domain_classes):
+        device = features.device
+        if centroids.shape[0] == 0:
+            return torch.tensor(0.0, device=device)
+        logits = -self._pairwise_l2_distance(centroids, features)
+        centroid_domains = centroid_domain_classes[:, 0].view(-1, 1)
+        sample_domains = domains.view(1, -1)
+        same_env_mask = (centroid_domains == sample_domains)
+        if self.hparams.get('use_calibration', False):
+            n_samples_table_device = self.n_samples_table.to(device)
+            epsilon = 1.0
+            n_num = n_samples_table_device[centroid_domain_classes[:, 0].long(), centroid_domain_classes[:, 1].long()] + epsilon
+            n_den = n_samples_table_device[domains.long(), labels.long()] + epsilon
+            H, W = n_num.size(0), n_den.size(0)
+            base_w = (n_num.unsqueeze(1).expand(-1, W) /
+                      n_den.unsqueeze(0).expand(H, -1)) ** self.hparams.get('nu', 0.5)
+            gamma = self.hparams.get("cross_env_gamma", 1.0)
+            cross_w = torch.where(same_env_mask, 1.0, gamma)
+            cal_w = base_w * cross_w
+            logits = logits * cal_w
+        logits = logits / self.hparams.get('temperature', 1.0)
+        centroid_labels = centroid_domain_classes[:, 1].view(-1, 1)
+        sample_labels = labels.view(1, -1)
+        mask_cls = (centroid_labels == sample_labels)
+        pos_mask = mask_cls & (~same_env_mask)
+        cnt_pos = pos_mask.sum(dim=0)
+        valid_samples_mask = cnt_pos > 0
+        if not valid_samples_mask.any():
+            return torch.tensor(0.0, device=device)
+        logits_valid = logits[:, valid_samples_mask]
+        pos_mask_valid = pos_mask[:, valid_samples_mask]
+        neg_logits = logits_valid.clone()
+        neg_logits[pos_mask_valid] = -float('inf')
+        has_valid_neg_mask = torch.any(neg_logits > -float('inf'), dim=0)
+        if not has_valid_neg_mask.any():
+            return torch.tensor(0.0, device=device)
+        logits_final = logits_valid[:, has_valid_neg_mask]
+        pos_mask_final = pos_mask_valid[:, has_valid_neg_mask]
+        neg_logits_final = neg_logits[:, has_valid_neg_mask]
+        log_sum_exp = torch.logsumexp(neg_logits_final, dim=0, keepdim=True)
+        log_prob = logits_final - log_sum_exp
+        lp_pos = log_prob[pos_mask_final]
+        loss = -lp_pos.mean()
+        return loss
+    def meta_update(self, base_minibatches, support_set, query_set, held_out_domain_idx):
+        device = support_set[0].device
+        source_minibatches_with_indices = [
+            (i, mb) for i, mb in enumerate(base_minibatches) if i != held_out_domain_idx
+        ]
+        if not source_minibatches_with_indices:
+            return {'loss_base_ce': 0.0, 'loss_base_da': 0.0, 'loss_meta': 0.0, 'total_loss': 0.0}
+        source_centroids, source_domain_classes = self._compute_centroids(source_minibatches_with_indices)
+        featurizer_fast_weights = collections.OrderedDict(self.featurizer.named_parameters())
+        classifier_fast_weights = collections.OrderedDict(self.classifier.named_parameters())
+        s_x, s_y, s_d_original = support_set
+        s_features = self.featurizer.forward_with_params(s_x, featurizer_fast_weights)
+        s_logits = self.classifier.forward_with_params(s_features, classifier_fast_weights)
+        inner_loss_ce = F.cross_entropy(s_logits, s_y)
+        s_features_normalized = F.normalize(s_features, p=2, dim=1)
+        inner_loss_da = self._compute_da_loss(s_features_normalized, s_y, s_d_original, source_centroids, source_domain_classes)
+        inner_loss = inner_loss_ce + self.hparams['lambda_da'] * inner_loss_da
+        if torch.isnan(inner_loss) or torch.isinf(inner_loss):
+            print(f"Warning: NaN or Inf detected in inner_loss. Skipping update.")
+            return {'loss_base_ce': 0.0, 'loss_base_da': 0.0, 'loss_meta': 0.0, 'total_loss': 0.0}
+        all_params = list(self.featurizer.parameters()) + list(self.classifier.parameters())
+        all_fast_weights = list(featurizer_fast_weights.values()) + list(classifier_fast_weights.values())
+        grads = torch.autograd.grad(inner_loss, all_fast_weights, create_graph=False)
+        num_featurizer_params = len(featurizer_fast_weights)
+        adapted_featurizer_weights = collections.OrderedDict()
+        adapted_classifier_weights = collections.OrderedDict()
+        for i, (name, param) in enumerate(featurizer_fast_weights.items()):
+            adapted_featurizer_weights[name] = param - self.hparams['inner_lr'] * grads[i]
+        for i, (name, param) in enumerate(classifier_fast_weights.items()):
+            adapted_classifier_weights[name] = param - self.hparams['inner_lr'] * grads[num_featurizer_params + i]
+        base_loss_ce_list, base_loss_da_list = [], []
+        for original_idx, (x, y) in enumerate(base_minibatches):
+             if original_idx == held_out_domain_idx:
+                 continue
+             d = torch.full_like(y, original_idx)
+             features = self.featurizer(x)
+             logits = self.classifier(features)
+             base_loss_ce_list.append(F.cross_entropy(logits, y))
+             base_loss_da_list.append(self._compute_da_loss(features, y, d, source_centroids, source_domain_classes))
+        base_loss_ce = torch.mean(torch.stack(base_loss_ce_list)) if base_loss_ce_list else torch.tensor(0.0, device=device)
+        base_loss_da = torch.mean(torch.stack(base_loss_da_list)) if base_loss_da_list else torch.tensor(0.0, device=device)
+        q_x, q_y = query_set
+        q_features = self.featurizer.forward_with_params(q_x, adapted_featurizer_weights)
+        q_logits = self.classifier.forward_with_params(q_features, adapted_classifier_weights)
+        meta_loss = F.cross_entropy(q_logits, q_y)
+        total_outer_loss = (base_loss_ce +
+                            self.hparams['lambda_da'] * base_loss_da +
+                            self.hparams['meta_beta'] * meta_loss)
+        if torch.isnan(total_outer_loss) or torch.isinf(total_outer_loss):
+            print(f"Warning: NaN or Inf detected in total_outer_loss at step. Skipping update.")
+            return {
+                'loss_base_ce': base_loss_ce.item() if not torch.isnan(base_loss_ce) else 0,
+                'loss_base_da': base_loss_da.item() if not torch.isnan(base_loss_da) else 0,
+                'loss_meta': meta_loss.item() if not torch.isnan(meta_loss) else 0,
+                'total_loss': 0
+            }
+        self.optimizer.zero_grad()
+        total_outer_loss.backward()
+        torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+        self.optimizer.step()
+        return {
+            'loss_base_ce': base_loss_ce.item(),
+            'loss_base_da': base_loss_da.item(),
+            'loss_meta': meta_loss.item(),
+            'total_loss': total_outer_loss.item()
+        }
+    def predict(self, x):
+        return self.classifier(self.featurizer(x))
+    def return_feats(self, x):
+        return self.featurizer(x)
 
-#     def __init__(self, input_shape, num_classes, num_domains, hparams, env_labels=None):
-#         super(KL, self).__init__(input_shape, num_classes, num_domains, hparams, env_labels)
 
-#         self.featurizer = networks.Featurizer(input_shape, self.hparams, probabilistic=True)
-#         self.classifier = networks.Classifier(
-#             self.featurizer.n_outputs,
-#             num_classes,
-#             self.hparams['nonlinear_classifier'])
-
-#         cls_lr = 100*self.hparams["lr"] if hparams['nonlinear_classifier'] else self.hparams["lr"]
-
-
-#         self.optimizer = torch.optim.Adam(
-#             #list(self.featurizer.parameters()) + list(self.classifier.parameters()),
-#             [{'params': self.featurizer.parameters(), 'lr': self.hparams["lr"]},
-#                 {'params': self.classifier.parameters(), 'lr': cls_lr}],
-#             lr=self.hparams["lr"],
-#             weight_decay=self.hparams['weight_decay']
-#         )
-#         self.num_samples = hparams['num_samples']
-#         self.kl_reg = hparams['kl_reg']
-#         self.kl_reg_aux = hparams['kl_reg_aux']
-#         self.augment_softmax = hparams['augment_softmax']
-
-#     def update(self, minibatches, unlabeled=None):
-
-#         x = torch.cat([x for x,y in minibatches])
-#         y = torch.cat([y for x,y in minibatches])
-
-#         x_target = torch.cat(list(unlabeled.values()))
-#         # x_target = torch.cat(unlabeled)
-
-#         total_x = torch.cat([x,x_target])
-#         total_z_params = self.featurizer(total_x)
-#         z_dim = int(total_z_params.shape[-1]/2)
-#         total_z_mu = total_z_params[:,:z_dim]
-#         total_z_sigma = F.softplus(total_z_params[:,z_dim:]) 
-
-#         z_mu, z_sigma = total_z_mu[:x.shape[0]], total_z_sigma[:x.shape[0]]
-#         z_mu_target, z_sigma_target = total_z_mu[x.shape[0]:], total_z_sigma[x.shape[0]:]
-
-#         z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
-#         z = z_dist.rsample()
-
-#         z_dist_target = dist.Independent(dist.normal.Normal(z_mu_target,z_sigma_target),1)
-#         z_target = z_dist_target.rsample()
-
-#         preds = torch.softmax(self.classifier(z),1)
-#         if self.augment_softmax != 0.0:
-#             K = 1 - self.augment_softmax * preds.shape[1]
-#             preds = preds*K + self.augment_softmax
-#         loss = F.nll_loss(torch.log(preds),y) 
-
-#         mix_coeff = dist.categorical.Categorical(x.new_ones(x.shape[0]))
-#         mixture = dist.mixture_same_family.MixtureSameFamily(mix_coeff,z_dist)
-#         mix_coeff_target = dist.categorical.Categorical(x_target.new_ones(x_target.shape[0]))
-#         mixture_target = dist.mixture_same_family.MixtureSameFamily(mix_coeff_target,z_dist_target)
+class TALLYAlgorithm(Algorithm):
+    """
+    TALLY: Tallying Class-conditional Features and Feature-conditional Statistics for Generalization
+    
+    This class wraps the TALLY model and its unique training logic (warmup and augmentation)
+    to be compatible with the common training script (e.g., train_BoDA.py).
+    """
+    def __init__(self, input_shape, num_classes, num_domains, hparams, train_dataset=None):
+        super(TALLYAlgorithm, self).__init__(input_shape, num_classes, num_domains, hparams)
         
-#         obj = loss
-#         kl = loss.new_zeros([])
-#         kl_aux = loss.new_zeros([])
-#         if self.kl_reg != 0.0:
-#             kl = (mixture_target.log_prob(z_target)-mixture.log_prob(z_target)).mean()
-#             obj = obj + self.kl_reg*kl
-#         if self.kl_reg_aux != 0.0:
-#             kl_aux = (mixture.log_prob(z)-mixture_target.log_prob(z)).mean()
-#             obj = obj + self.kl_reg_aux*kl_aux
-
-#         self.optimizer.zero_grad()
-#         obj.backward()
-#         self.optimizer.step()
-
-#         return {'loss': loss.item(), 'kl': kl.item(), 'kl_aux': kl_aux.item()}
-
-#     def predict(self, x):
-#         z_params = self.featurizer(x)
-#         z_dim = int(z_params.shape[-1]/2)
-#         z_mu = z_params[:,:z_dim]
-#         z_sigma = F.softplus(z_params[:,z_dim:]) 
-
-#         z_dist = dist.Independent(dist.normal.Normal(z_mu,z_sigma),1)
+        if train_dataset is None:
+            raise ValueError("TALLYAlgorithm requires the `train_dataset` object for statistics updates.")
+            
+        self.network = TALLY_Model(num_classes, hparams['mix_alpha'])
         
-#         preds = 0.0
-#         for s in range(self.num_samples):
-#             z = z_dist.rsample()
-#             preds += F.softmax(self.classifier(z),1)
-#         preds = preds/self.num_samples
+        # 옵티마이저는 hparams에 정의된 것을 사용 (예: Adam)
+        self.optimizer = torch.optim.Adam(
+            self.network.parameters(),
+            lr=hparams["lr"],
+            weight_decay=hparams['weight_decay']
+        )
+        
+        self.register_buffer('update_count', torch.tensor([0]))
+        
+        # hparams에서 warmup 스텝 수 계산
+        # train_BoDA.py의 steps_per_epoch 계산 방식을 참고할 수 있으나, 간단하게 hparam으로 직접 받는 것이 편리함
+        if 'warmup_steps' not in hparams:
+            raise ValueError("hparams must contain 'warmup_steps' for TALLYAlgorithm.")
+        self.warmup_steps = hparams['warmup_steps']
+        
+        self.train_dataset = train_dataset
+        
+        # criterion은 train_BoDA.py가 아닌 TALLY의 main.py 방식을 따름 (단순 CrossEntropy)
+        self.criterion = nn.CrossEntropyLoss()
 
-#         K = 1 - 0.05 * preds.shape[1]
-#         preds = preds*K + 0.05
-#         return preds
+    def update(self, minibatch, env_feats=None): # 인자가 minibatches 리스트가 아닌 단일 minibatch
+        """
+        Performs a single training step.
+        Handles both the warmup and main training phases internally.
+        
+        `minibatch` is a single tuple containing tensors for the whole batch:
+        (all_x, all_y, all_domain, all_idx, all_n, all_s, all_m)
+        """
+        all_x, all_y, _, all_idx, all_n, all_s, all_m = minibatch
+        
+        self.network.train()
+        self.optimizer.zero_grad()
+        
+        loss = 0
+        step_vals = {}
+
+        if self.update_count < self.warmup_steps:
+            # --- WARMUP PHASE ---
+            y_hat, norm, sig, mu = self.network.forward_train(all_x)
+            loss = self.criterion(y_hat, all_y)
+            
+            # 통계 업데이트 (all_idx를 두 번 사용)
+            self.train_dataset.update_statistics(norm.detach().cpu(), sig.detach().cpu(), mu.detach().cpu(), all_idx, all_idx)
+            step_vals = {'loss': loss.item(), 'phase': 0}
+
+        else:
+            # --- MAIN TRAINING PHASE ---
+            total_size = all_x.shape[0]
+            if total_size % 2 != 0: total_size -= 1
+            batch_size = total_size // 2
+            
+            x1, x2 = all_x[:batch_size], all_x[batch_size:total_size]
+            y1 = all_y[:batch_size]
+            idx1, idx2 = all_idx[:batch_size], all_idx[batch_size:total_size]
+            n1 = all_n[:batch_size]
+            s2, m2 = all_s[batch_size:total_size], all_m[batch_size:total_size]
+
+            y_hat, norm, sig, mu = self.network.forward_train_aug(x1, n1, x2, m2, s2)
+            loss = self.criterion(y_hat, y1)
+            
+            self.train_dataset.update_statistics(norm.detach().cpu(), sig.detach().cpu(), mu.detach().cpu(), idx1, idx2)
+            step_vals = {'loss': loss.item(), 'phase': 1}
+            
+        loss.backward()
+        self.optimizer.step()
+        self.update_count += 1
+        return step_vals
+
+    def predict(self, x):
+        """For inference."""
+        self.network.eval()
+        return self.network(x) # TALLY.forward가 자동으로 forward_test를 호출
+
+    def return_feats(self, x):
+        """Returns features from the model."""
+        self.network.eval()
+        return self.network.featurize(x)

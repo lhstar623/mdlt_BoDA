@@ -113,6 +113,17 @@ def _hparams(algorithm, dataset, random_seed):
         _hparam('pgd_steps', 10, lambda r: r.choice([7, 10]))
     # ================= [  수정 끝  ] =================
 
+    # TALLY 알고리즘을 위한 하이퍼파라미터 정의
+    elif algorithm == 'TALLYAlgorithm':
+        # TALLY와 동일한 기본 하이퍼파라미터 사용
+        _hparam('mix_alpha', 0.5, lambda r: 1)
+        _hparam('warmup_steps', 2000, lambda r: 1)
+        # _hparam('lr', 3e-5, lambda r: 1)
+        # _hparam('weight_decay', 1e-6, lambda r: 1)
+    
+
+    # ================= [  수정 끝  ] =================
+
     elif "Mixup" in algorithm:
         _hparam('mixup_alpha', 0.2, lambda r: 10**r.uniform(-1, -1))
 

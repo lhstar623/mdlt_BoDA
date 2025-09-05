@@ -44,8 +44,8 @@ def num_environments(dataset_name):
 class MultipleDomainDataset:
     N_STEPS = 5001           # Default, subclasses may override
     CHECKPOINT_FREQ = 100    # Default, subclasses may override
-    # N_WORKERS = 6            # Default, subclasses may override
-    N_WORKERS = 8            # Default, subclasses may override
+    N_WORKERS = 6            # Default, subclasses may override
+    # N_WORKERS = 8            # Default, subclasses may override
     MANY_SHOT_THRES = 100    # Default, subclasses may override
     FEW_SHOT_THRES = 20      # Default, subclasses may override
     ENVIRONMENTS = None      # Subclasses should override
@@ -581,6 +581,9 @@ class PACS(MultipleEnvironmentImageFolder):
 
 class DomainNet(MultipleEnvironmentImageFolder):
     N_STEPS = 15001
+    # TALLY에선 default epochs 15, warmup_epochs 7로 뒀으니 
+    # 새로 추가한 warmup_steps를 적당히 그 절반하면 (default step 5001 default warmup_steps 2000)
+    # 되는데 DomainNet에서만 STEPS가 15000이라 warmup_steps 7000으로 의심됨
     CHECKPOINT_FREQ = 300
     ENVIRONMENTS = ["clip", "info", "paint", "quick", "real", "sketch"]
     MANY_SHOT_THRES = 100

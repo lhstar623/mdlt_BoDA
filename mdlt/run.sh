@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=sweep_BoDA_1stage_PACS
+#SBATCH --job-name=TALLY_DomainNet
 #SBATCH --partition=laal_3090
 #SBATCH --nodes=1    
 #SBATCH --gres=gpu:1
@@ -49,24 +49,28 @@ cd /home/hyunggyu/imbalance/multi-domain-imbalance
 #   --output_dir ./output \
 #   --boda_dist_measure "mahalanobis" \
 
-# python -m mdlt.train \
-#   --algorithm CRT \
-#   --dataset PACS \
-#   --output_folder_name sweep_PACS_BoDA_mahal_1stage_mulSeed \
-#   --data_dir /home/shared \
-#   --output_dir ./output \
-#   --stage1_folder ./PACS_mahal_1stage \
-#   --stage1_algo 'BoDA' \
-#   --boda_dist_measure "mahalanobis" \
+# python -m mdlt.scripts.collect_results --input_dir ./output/sweep_PACS_BoDA_mahal_1stage_mulSeed
+
+python -m mdlt.train \
+  --algorithm TALLYAlgorithm \
+  --output_folder_name TALLY_DomainNet \
+  --data_dir /home/shared \
+  --output_dir ./output \
+  --hparams_seed 0 \
+  --seed 0 
+  # --dataset PACS \
+  # --stage1_folder ./sweep_PACS_BoDA_mahal_1stage_mulSeed \
+  # --stage1_algo 'BoDA' \
+  # --boda_dist_measure "mahalanobis" \
 
 # MDLD_TIME1
-python -m mdlt.sweep launch \
-  --output_folder_name  sweep_PACS_BoDA_mahal_1stage_mulSeed \
-  --algorithms 'BoDA' \
-  --data_dir /home/shared \
-  --dataset PACS \
-  --output_dir ./output \
-  --skip_confirmation \
+# python -m mdlt.sweep launch \
+#   --output_folder_name  sweep_PACS_BoDA_mahal_2stage_mulHparam \
+#   --algorithms 'BoDA' \
+#   --data_dir /home/shared \
+#   --dataset PACS \
+#   --output_dir ./output \
+#   --skip_confirmation \
 
 # MDLD_TIME1
 # python -m mdlt.sweep launch \
@@ -145,3 +149,19 @@ python -m mdlt.sweep launch \
 # --algorithms 'CRT' \
 # --algorithms 'BoDA' \
 # --algorithms 'KL' \
+
+# DATASETS = [
+#     # Debug
+#     "Debug28",
+#     "Debug224",
+#     # Small MDLT datasets
+#     "ImbalancedColoredMNIST",
+#     "ImbalancedRotatedMNIST",
+#     "ImbalancedDigits",
+#     # Big MDLT datasets
+#     "VLCS",
+#     "PACS",
+#     "OfficeHome",
+#     "TerraIncognita",
+#     "DomainNet"
+# ]
