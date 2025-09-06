@@ -12,6 +12,7 @@ import torch
 import torchvision
 import torch.utils.data
 from tensorboard_logger import Logger
+from tqdm import tqdm
 
 from mdlt import hparams_registry
 from mdlt.dataset import datasets
@@ -487,6 +488,8 @@ if __name__ == "__main__":
 
     algorithm_class = algorithms.get_algorithm_class(args.algorithm)
 
+
+
     # --- [ 수정 시작 ] ---
     if args.algorithm == 'TALLYAlgorithm':
         # TALLYDataset은 여러 도메인을 포함하는 단일 객체일 수 있음
@@ -496,10 +499,9 @@ if __name__ == "__main__":
         algorithm = algorithm_class(
             input_shape, num_classes, len(train_dataset), hparams, train_dataset=train_dataset_wrapped
         )
-    else: # 기존 로직
-        algorithm = algorithm_class(
-            input_shape, num_classes, len(train_dataset), hparams, env_labels=train_labels
-        )
+    elif args.algorithm == 'MLIR':
+        algorithm = algorithm_class(train_dataset.input_shape, train_dataset.num_classes, len(train_dataset.ENVIRONMENTS), hparams)   
+     
     # --- [ 수정 끝 ] ---
 
     # load stage1 model if using 2-stage algorithm
@@ -563,7 +565,7 @@ if __name__ == "__main__":
             shutil.copyfile(filename, filename.replace('pkl', 'best.pkl'))
 
     last_results_keys = None
-    for step in range(start_step, n_steps):
+    for step in tqdm(range(start_step, n_steps), total=n_steps):
         step_start_time = time.time()
 
         # --- [ TALLY 통합 수정 ] ---

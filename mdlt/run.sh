@@ -1,24 +1,37 @@
 #!/bin/bash
 
-#SBATCH --job-name=TALLY_DomainNet
-#SBATCH --partition=laal_3090
+#SBATCH --job-name=MLIR_TerraIncognita
+#SBATCH --partition=laal_a6000
 #SBATCH --nodes=1    
 #SBATCH --gres=gpu:1
-#SBATCH --mem=50GB
-#SBATCH --cpus-per-task=5
+#SBATCH --mem=20GB
+#SBATCH --cpus-per-task=4
+#SBATCH --time=0-150:00:00  # 시간 제한 (최대 36시간)
 #SBATCH --output=./slurm_logs/S-%x.%j.out     
 
-cd /home/hyunggyu/imbalance/multi-domain-imbalance
+# cd /home/hyunggyu/imbalance/multi-domain-imbalance
 
 # nvidia-smi
 
-# python -m mdlt.train \
-#   --dataset PACS \
-#   --algorithm IRM \
-#   --output_folder_name res18_test \
-#   --data_dir /home/shared \
-#   --output_dir ./output \
-#   --hparams '{"resnet18": true}'
+source ~/.bashrc
+source ~/anaconda3/bin/activate
+conda activate spec
+
+#     "VLCS",
+#     "PACS",
+#     "OfficeHome",
+#     "TerraIncognita",
+#     "DomainNet"
+
+python -m mdlt.train \
+  --dataset TerraIncognita \
+  --algorithm MLIR \
+  --output_folder_name res50_test \
+  --data_dir /home/shared \
+  --output_dir ./output \
+  --hparams '{"resnet50": true}' \
+  --hparams_seed 0 \
+  --seed 0
 
 
 # python -m mdlt.scripts.download --data_dir /home/shared
@@ -51,13 +64,13 @@ cd /home/hyunggyu/imbalance/multi-domain-imbalance
 
 # python -m mdlt.scripts.collect_results --input_dir ./output/sweep_PACS_BoDA_mahal_1stage_mulSeed
 
-python -m mdlt.train \
-  --algorithm TALLYAlgorithm \
-  --output_folder_name TALLY_DomainNet \
-  --data_dir /home/shared \
-  --output_dir ./output \
-  --hparams_seed 0 \
-  --seed 0 
+# python -m mdlt.train \
+#   --algorithm TALLYAlgorithm \
+#   --output_folder_name TALLY_DomainNet \
+#   --data_dir /home/shared \
+#   --output_dir ./output \
+#   --hparams_seed 0 \
+#   --seed 0 
   # --dataset PACS \
   # --stage1_folder ./sweep_PACS_BoDA_mahal_1stage_mulSeed \
   # --stage1_algo 'BoDA' \

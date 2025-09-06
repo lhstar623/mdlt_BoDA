@@ -221,6 +221,16 @@ def Classifier(in_features, out_features, is_nonlinear=False):
     else:
         return torch.nn.Linear(in_features, out_features)
 
+def AdvClassifier(in_features, out_features, in_nonlinear=False):
+    if in_nonlinear:
+        return torch.nn.Sequential(
+            torch.nn.Linear(in_features, in_features // 2),
+            torch.nn.ReLU(),
+            torch.nn.Linear(in_features // 2, out_features)
+        )
+    else:
+        return torch.nn.Linear(in_features, out_features)
+
 
 class WholeFish(nn.Module):
     def __init__(self, input_shape, num_classes, hparams, weights=None):

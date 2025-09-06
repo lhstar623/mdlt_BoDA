@@ -6,13 +6,14 @@ import copy
 import numpy as np
 
 from mdlt.models import networks
-from mdlt.utils.misc import count_samples_per_class, random_pairs_of_minibatches, ParamDict
+from mdlt.utils.misc import count_samples_per_class, random_pairs_of_minibatches, ParamDict, random_split_minibatches
 
 # TALLY 모델 및 관련 모듈 import
 from mdlt.learning.TALLY.tally  import TALLY as TALLY_Model
 from mdlt.learning.TALLY.tally  import AdaIN, calculate_statistics
 # TALLY 데이터셋 클래스 import (경로는 실제 프로젝트 구조에 맞게 조정 필요)
 from mdlt.learning.TALLY.dataset import IWildCam, PACS, VLCS, OfficeHome, DomainNet, TerraIncognita
+
 
 ALGORITHMS = [
     'ERM',
@@ -38,7 +39,8 @@ ALGORITHMS = [
     'BoDA',
     'LODO_DA_MAML',
     'CAWRA_TAROT',
-    'TALLYAlgorithm'
+    'TALLYAlgorithm',
+    'MLIR'
 ]
 
 
@@ -1088,6 +1090,199 @@ class GroupDRO(ERM):
         self.optimizer.step()
 
         return {'loss': loss.item()}
+
+
+class MLIR(ERM):
+    """
+    Meta‑Learning the Invariant Representation for domain generalization
+    Code from: https://github.com/jiachenwestlake/MLIR
+    Paper: https://link.springer.com/article/10.1007/s10994-022-06256-y
+    """
+    def __init__(self, input_shape, num_classes, num_domains, hparams):
+        super(MLIR, self).__init__(input_shape, num_classes, num_domains, hparams)
+
+        #Algorithms
+        self.num_domains = num_domains
+        self.featurizer = networks.Featurizer(input_shape, self.hparams)
+        advclassifier = networks.AdvClassifier(
+            self.featurizer.n_outputs,
+            num_classes,
+            False
+        )
+
+        self.advclassifiers = nn.ModuleList([copy.deepcopy(advclassifier) for _ in range(int((num_domains)*(num_domains-1)/2))])
+
+        self.classifier = networks.Classifier(
+            self.featurizer.n_outputs,
+            num_classes,
+            self.hparams['nonlinear_classifier']
+        )
+        #Optimizers
+        self.class_opt = torch.optim.Adam(
+            self.classifier.parameters(),
+            lr=self.hparams["lr"],
+            weight_decay=self.hparams['weight_decay'],
+            # betas=(self.hparams['beta1'], 0.9)
+        )
+
+        self.disc_opt = torch.optim.Adam(
+            self.advclassifiers.parameters(),
+            lr=self.hparams["lr_d"],
+            weight_decay=self.hparams['weight_decay_d'],
+            betas=(self.hparams['beta1'], 0.9)
+        )
+
+        self.gen_opt = torch.optim.Adam(
+            self.featurizer.parameters(),
+            lr=self.hparams["lr_g"]*self.hparams["advfactor_gamma"],
+            weight_decay=self.hparams['weight_decay_g'],
+            betas=(self.hparams['beta1'], 0.9)
+        )
+
+    def inner_obj(self, clone_featurizer, sources, sources_ids, num_splits=1, update=True):
+        n_source = len(sources)
+        # print(n_source)
+        disc = 0.
+        num_disc = 0
+        for s_i in range(n_source-1):
+            for s_j in range(s_i + 1, n_source):
+                num_disc += 1
+                source1, source2 = sources[s_i], sources[s_j] # (x,y)
+                source1_idx, source2_idx = sources_ids[s_i], sources_ids[s_j] # index of 2 sources
+                s1_idx = min(source1_idx, source2_idx) # smaller source idx
+                s2_idx = max(source1_idx, source2_idx) # bigger source idx
+                source1_z, source2_z = clone_featurizer(source1[0]), clone_featurizer(source2[0])
+                source1_y, source2_y = source1[1], source2[1]
+                classifier_idx = int((2*self.num_domains-s1_idx-1)*s1_idx/2+s2_idx-s1_idx-1)
+                classifier = self.advclassifiers[classifier_idx] # classifier of the source pair
+                er_s1 = F.cross_entropy(classifier(source1_z), source1_y)
+                er_s2 = F.cross_entropy(classifier(source2_z), source2_y)
+                disc += torch.abs(er_s1 - er_s2)
+        disc /= num_disc
+        ## update the discriminator
+        if update:
+            disc_loss = -disc/num_splits
+            self.disc_opt.zero_grad()
+            disc_loss.backward()
+            self.disc_opt.step()
+            # print(num_splits)
+            # print("inner loss: \n")
+            # print(disc_loss)
+            # exit(0)
+        return disc
+
+    def outer_obj(self, clone_featurizer, sources, sources_ids, target, target_ids, num_splits=1, update=True):
+        n_source = len(sources)
+        disc = 0
+        for s_i in range(n_source):
+            source = sources[s_i] #(x,y)
+            source_idx = sources_ids[s_i] # index of source
+            s1_idx = min(source_idx, target_ids) # smaller source-targert idx
+            s2_idx = max(source_idx, target_ids) # bigger source-target idx
+            source_z = clone_featurizer(source[0])
+            target_z = clone_featurizer(target[0])
+            source_y, target_y = source[1], target[1]
+            classifier_idx = int((2*n_source-s1_idx-1)*s1_idx/2+s2_idx-s1_idx)
+            classifier = self.advclassifiers[classifier_idx]
+            er_s = F.cross_entropy(classifier(source_z), source_y)
+            er_t = F.cross_entropy(classifier(target_z), target_y)
+            disc += torch.abs(er_s - er_t)
+        disc /= n_source
+        ## update the discriminator
+        if update:
+            disc_loss = -disc/num_splits
+            self.disc_opt.zero_grad()
+            disc_loss.backward()
+            self.disc_opt.step()
+            # print("outer loss \n")
+            # print(disc_loss)
+        return disc
+
+    def update(self, minibatches, unlabeled=None):
+        num_splits = len(minibatches) * (len(minibatches) - 2)
+        objective_out = 0
+        objective_in = 0
+        # print(len(minibatches))
+        self.gen_opt.zero_grad()
+        self.class_opt.zero_grad()
+        for p in self.featurizer.parameters():
+            if p.grad is None:
+                p.grad = torch.zeros_like(p)
+
+        for split, split_ids in zip(random_split_minibatches(minibatches)[0], random_split_minibatches(minibatches)[1]):
+            target, target_ids = split[0], split_ids[0] #(x,y)
+            sources, sources_ids = split[1], split_ids[1] #[(x,y),...]
+            clone_featurizer = copy.deepcopy(self.featurizer)
+            clone_gen_opt = torch.optim.Adam(
+                clone_featurizer.parameters(),
+                lr=self.hparams["lr_g"]*self.hparams["advfactor_alpha"],
+                weight_decay=self.hparams['weight_decay_g'],
+                betas=(self.hparams['beta1'], 0.9)
+            )
+            ## inner loss
+            _ = self.inner_obj(clone_featurizer, sources, sources_ids, num_splits, update=True)
+            inner_disc = self.inner_obj(clone_featurizer, sources, sources_ids, num_splits, update=False)
+            inner_loss = inner_disc/num_splits
+            objective_in += inner_loss.item()
+            ##update the inner network
+            self.disc_opt.zero_grad()
+            clone_gen_opt.zero_grad()
+            inner_loss.backward()
+            clone_gen_opt.step()
+            ##outer loss
+            _ = self.outer_obj(clone_featurizer, sources, sources_ids, target, target_ids, num_splits, update=True)
+            outer_disc = self.outer_obj(clone_featurizer, sources, sources_ids, target, target_ids, num_splits, update=False)
+            out_loss = self.hparams['lambda'] * outer_disc
+            objective_out += out_loss.item()
+            ## compute the gradient
+            grad_outer = autograd.grad(out_loss, clone_featurizer.parameters(), allow_unused=True)
+            ## update the featurizer using the clone
+            for p, clone_gradient in zip(self.featurizer.parameters(), grad_outer):
+                if clone_gradient is not None:
+                    p.grad.data.add_(self.hparams['doml_beta'] * clone_gradient.data/num_splits)
+        ## classification loss
+        all_x = torch.cat([x for x, y in minibatches])
+        all_y = torch.cat([y for x, y in minibatches])
+        class_loss = F.cross_entropy(self.predict(all_x), all_y)
+        class_loss.backward()
+
+        objective_out /= num_splits
+
+        self.gen_opt.step()
+        self.class_opt.step()
+
+        return {'loss_in': objective_in, 'loss_out': objective_out}
+
+    def update_test(self, minibatches, unlabeled=None):
+        num_domains = len(minibatches)
+        sources_ids = [i for i in range(num_domains)]
+        x_list = [minibatches[i][0] for i in range(num_domains)]
+        y_list = [minibatches[i][1] for i in range(num_domains)]
+        n_min = min([len(_) for _ in x_list])
+        minibatches = [(x[:n_min], y[:n_min]) for x,y in zip(x_list, y_list)]
+
+        ## domain discrepancy loss
+        _ = self.inner_obj(self.featurizer, minibatches, sources_ids, update=True)
+        disc = self.inner_obj(self.featurizer, minibatches, sources_ids, update=False)
+        disc_loss = disc
+        ## classification loss
+        all_x = torch.cat([x for x, y in minibatches])
+        all_y = torch.cat([y for x, y in minibatches])
+        class_loss = F.cross_entropy(self.predict(all_x), all_y)
+        loss_all = self.hparams['lambda_test'] * disc_loss + class_loss
+        objective = loss_all.item()
+
+        self.gen_opt.zero_grad()
+        self.class_opt.zero_grad()
+        loss_all.backward()
+        self.gen_opt.step()
+        self.class_opt.step()
+
+        return {'loss': objective}
+
+    def predict(self, x):
+        return self.classifier(self.featurizer(x))
+
 
 
 class MLDG(ERM):

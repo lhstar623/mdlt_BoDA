@@ -43,8 +43,10 @@ def num_environments(dataset_name):
 
 class MultipleDomainDataset:
     N_STEPS = 5001           # Default, subclasses may override
+    N_STEPS_META_TEST = 15   # MLIR meta-test steps # Choise from {5,10,15}
+
     CHECKPOINT_FREQ = 100    # Default, subclasses may override
-    N_WORKERS = 6            # Default, subclasses may override
+    N_WORKERS = 4            # Default, subclasses may override
     # N_WORKERS = 8            # Default, subclasses may override
     MANY_SHOT_THRES = 100    # Default, subclasses may override
     FEW_SHOT_THRES = 20      # Default, subclasses may override

@@ -120,7 +120,14 @@ def _hparams(algorithm, dataset, random_seed):
         _hparam('warmup_steps', 2000, lambda r: 1)
         # _hparam('lr', 3e-5, lambda r: 1)
         # _hparam('weight_decay', 1e-6, lambda r: 1)
-    
+
+    ## MLIR
+    elif algorithm == 'MLIR':
+        _hparam('doml_beta', 1., lambda r: 10**r.uniform(-1, 1))
+        _hparam('lambda', 1.0, lambda r: 10**r.uniform(-2, 2))
+        _hparam('lambda_test', 1.0, lambda r: 10**r.uniform(-2, 2))
+        _hparam('beta1', 0.5, lambda r: r.choice([0., 0.5]))
+        _hparam('weight_decay_d', 0., lambda r: 10**r.uniform(-6, -2))
 
     # ================= [  수정 끝  ] =================
 
@@ -184,6 +191,17 @@ def _hparams(algorithm, dataset, random_seed):
     if 'CRT' in algorithm:
         _hparam('stage1_model', 'model.best.pkl', lambda r: 'model.best.pkl')
 
+    if 'MLIR' in algorithm:
+        _hparam('advfactor_alpha', 1.0, lambda r: 10**r.uniform(-1, 1))
+        _hparam('advfactor_gamma', 1.0, lambda r: 10**r.uniform(-1, 1))
+        if dataset in SMALL_IMAGES:
+            _hparam('lr_g', 1e-3, lambda r: 10**r.uniform(-4.5, -2.5))
+            _hparam('lr_d', 1e-3, lambda r: 10**r.uniform(-4.5, -2.5))
+        else:
+            _hparam('lr_g', 5e-5, lambda r: 10**r.uniform(-5, -3.5))
+            _hparam('lr_d', 5e-5, lambda r: 10**r.uniform(-5, -3.5))
+
+
     # Imbalanced dataset(-and-algorithm)-specific hparam definitions
     # Each block of code below corresponds to one specific imbalanced dataset
 
@@ -205,6 +223,12 @@ def _hparams(algorithm, dataset, random_seed):
         _hparam('imb_type_per_env', ['balance', 'balance', 'balance'], lambda r: ['balance', 'balance', 'balance'])
         _hparam('imb_factor', 0.1, lambda r: 0.1)
         _hparam('rand_seed', 0, lambda r: 0)
+
+    if 'MLIR' in algorithm and dataset in SMALL_IMAGES:
+        _hparam('weight_decay_g', 0., lambda r: 0.)
+    elif 'MLIR' in algorithm:
+        _hparam('weight_decay_g', 0., lambda r: 10**r.uniform(-6, -2))
+
 
     return hparams
 
