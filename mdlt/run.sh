@@ -8,17 +8,29 @@
 #SBATCH --cpus-per-task=6
 #SBATCH --output=./slurm_logs/S-%x.%j.out     
 
-cd /home/hyunggyu/imbalance/multi-domain-imbalance
+# cd /home/hyunggyu/imbalance/multi-domain-imbalance
 
 # nvidia-smi
 
-# python -m mdlt.train \
-#   --dataset PACS \
-#   --algorithm IRM \
-#   --output_folder_name res18_test \
-#   --data_dir /home/shared \
-#   --output_dir ./output \
-#   --hparams '{"resnet18": true}'
+source ~/.bashrc
+source ~/anaconda3/bin/activate
+conda activate spec
+
+#     "VLCS",
+#     "PACS",
+#     "OfficeHome",
+#     "TerraIncognita",
+#     "DomainNet"
+
+python -m mdlt.train \
+  --dataset TerraIncognita \
+  --algorithm MLIR \
+  --output_folder_name res50_test \
+  --data_dir /home/shared \
+  --output_dir ./output \
+  --hparams '{"resnet50": true}' \
+  --hparams_seed 0 \
+  --seed 0
 
 
 # python -m mdlt.scripts.download --data_dir /home/shared
@@ -59,10 +71,9 @@ cd /home/hyunggyu/imbalance/multi-domain-imbalance
 #   --hparams_seed 0 \
 #   --seed 0 \
 #   --dataset DomainNet126
-
-  # --stage1_folder ./sweep_PACS_BoDA_mahal_1stage_mulSeed \
-  # --stage1_algo 'BoDA' \
-  # --boda_dist_measure "mahalanobis" \
+# --stage1_folder ./sweep_PACS_BoDA_mahal_1stage_mulSeed \
+# --stage1_algo 'BoDA' \
+# --boda_dist_measure "mahalanobis" \
 
 # MDLD_TIME1
 python -m mdlt.sweep launch \

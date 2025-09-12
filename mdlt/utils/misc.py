@@ -9,7 +9,7 @@ from collections import Counter
 from collections import OrderedDict
 from numbers import Number
 from sklearn.metrics import confusion_matrix
-
+import random
 
 # --------------------------------------------------------------------------- #
 # New: KL‑divergence for discrete class distributions                         #
@@ -366,3 +366,20 @@ def save_image(tensor, filename, nrow=8, padding=2, normalize=False, ranges=None
     ndarray = grid.mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
     im = Image.fromarray(ndarray)
     im.save(filename)
+
+
+def random_split_minibatches(minibatches):
+    splits = []
+    splits_ids = []
+    for target_i in list(range(len(minibatches))):
+        rests_ids = [i for i in range(len(minibatches)) if i != target_i] # ids of sources
+        random.shuffle(rests_ids)
+        for end_idx in range(1, len(rests_ids)):
+            x_list = [minibatches[idx][0] for idx in rests_ids[:end_idx+1]]
+            y_list = [minibatches[idx][1] for idx in rests_ids[:end_idx+1]]
+            min_n = min([len(x) for x in x_list] + [len(minibatches[target_i][0])])
+            sources = [(x[:min_n], y[:min_n]) for x,y in zip(x_list, y_list)]
+            splits.append(((minibatches[target_i][0][:min_n], minibatches[target_i][1][:min_n]), sources))
+            splits_ids.append((target_i, rests_ids))
+            
+    return splits, splits_ids
