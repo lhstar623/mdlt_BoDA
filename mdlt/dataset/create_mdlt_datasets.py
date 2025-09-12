@@ -13,6 +13,7 @@ DATASETS = {
     'TerraIncognita': 'terra_incognita',
     'DomainNet': 'domain_net',
     'SVIRO': 'sviro',
+    'DomainNet126' : 'DomainNet126'
 }
 NUM_SAMPLES_PER_CLASS = {
     # (num_test, num_val) tuple, by default num_val is set to half of num_test
@@ -21,6 +22,7 @@ NUM_SAMPLES_PER_CLASS = {
     'OfficeHome': (10, 5),
     'TerraIncognita': (20, 10),
     'DomainNet': (40, 20),
+    'DomainNet126' : (40, 20),
     'SVIRO': (100, 50),
 }
 ALPHA = 0.8

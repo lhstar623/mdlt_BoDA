@@ -42,19 +42,19 @@ class Job:
         self.command_str = ' '.join(command)
 
         # hyunggyu - for training_time & GPU_usage logging
-        timestamp = '$(date +%Y%m%d_%H%M%S)'
-        gpu_log_path = f"{self.output_dir}/gpu_usage_{timestamp}.csv"
-        time_log_path = f"{self.output_dir}/time_log_{timestamp}.txt"
+        # timestamp = '$(date +%Y%m%d_%H%M%S)'
+        # gpu_log_path = f"{self.output_dir}/gpu_usage_{timestamp}.csv"
+        # time_log_path = f"{self.output_dir}/time_log_{timestamp}.txt"
 
-        self.command_str = (
-            f"nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,"
-            f"memory.total,memory.used --format=csv -l 5 > {gpu_log_path} & "
-            f"START=$(date +%s); "
-            f"{' '.join(command)}; "
-            f"END=$(date +%s); "
-            f"echo \"Total time: $((END - START)) seconds\" > {time_log_path}; "
-            f"pkill -f \"nvidia-smi --query-gpu\""
-        )
+        # self.command_str = (
+        #     f"nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,"
+        #     f"memory.total,memory.used --format=csv -l 5 > {gpu_log_path} & "
+        #     f"START=$(date +%s); "
+        #     f"{' '.join(command)}; "
+        #     f"END=$(date +%s); "
+        #     f"echo \"Total time: $((END - START)) seconds\" > {time_log_path}; "
+        #     f"pkill -f \"nvidia-smi --query-gpu\""
+        # )
 
         if os.path.exists(os.path.join(self.output_dir, 'done')):
             self.state = Job.DONE
@@ -217,7 +217,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     args_list = make_args_list(
-        n_trials=1,  # args.n_trials
+        n_trials=args.n_trials,
+        # n_trials=1,  # args.n_trials
         dataset_names=args.dataset,
         algorithms=args.algorithms,
         n_hparams_from=args.n_hparams_from,

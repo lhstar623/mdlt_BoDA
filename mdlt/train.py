@@ -53,87 +53,87 @@ def str2bool(v):
     raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-class ResourceTracker:
-    def __init__(self, device_index=0, interval=1):
-        self.device_index = device_index
-        self.interval = interval
-        self._stop_event = threading.Event()
+# class ResourceTracker:
+#     def __init__(self, device_index=0, interval=1):
+#         self.device_index = device_index
+#         self.interval = interval
+#         self._stop_event = threading.Event()
 
-        # GPU 통계
-        self.gpu_min = float('inf')
-        self.gpu_max = float('-inf')
-        self.gpu_sum = 0
-        self.gpu_count = 0
+#         # GPU 통계
+#         self.gpu_min = float('inf')
+#         self.gpu_max = float('-inf')
+#         self.gpu_sum = 0
+#         self.gpu_count = 0
 
-        self.mem_min = float('inf')
-        self.mem_max = float('-inf')
-        self.mem_sum = 0
-        self.mem_count = 0
+#         self.mem_min = float('inf')
+#         self.mem_max = float('-inf')
+#         self.mem_sum = 0
+#         self.mem_count = 0
 
-        # CPU 메모리 (RSS, MB)
-        self.cpu_min = float('inf')
-        self.cpu_max = float('-inf')
-        self.cpu_sum = 0
-        self.cpu_count = 0
+#         # CPU 메모리 (RSS, MB)
+#         self.cpu_min = float('inf')
+#         self.cpu_max = float('-inf')
+#         self.cpu_sum = 0
+#         self.cpu_count = 0
 
-        self.start_time = None
-        self.end_time = None
+#         self.start_time = None
+#         self.end_time = None
 
-    def _track(self):
-        pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
-        process = psutil.Process()
+#     def _track(self):
+#         pynvml.nvmlInit()
+#         handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+#         process = psutil.Process()
 
-        self.start_time = time.time()
+#         self.start_time = time.time()
 
-        while not self._stop_event.is_set():
-            # GPU
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            gpu = util.gpu
-            mem_used = mem.used / 1024 / 1024
+#         while not self._stop_event.is_set():
+#             # GPU
+#             util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+#             mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+#             gpu = util.gpu
+#             mem_used = mem.used / 1024 / 1024
 
-            self.gpu_min = min(self.gpu_min, gpu)
-            self.gpu_max = max(self.gpu_max, gpu)
-            self.gpu_sum += gpu
-            self.gpu_count += 1
+#             self.gpu_min = min(self.gpu_min, gpu)
+#             self.gpu_max = max(self.gpu_max, gpu)
+#             self.gpu_sum += gpu
+#             self.gpu_count += 1
 
-            self.mem_min = min(self.mem_min, mem_used)
-            self.mem_max = max(self.mem_max, mem_used)
-            self.mem_sum += mem_used
-            self.mem_count += 1
+#             self.mem_min = min(self.mem_min, mem_used)
+#             self.mem_max = max(self.mem_max, mem_used)
+#             self.mem_sum += mem_used
+#             self.mem_count += 1
 
-            # CPU
-            rss_used = process.memory_info().rss / 1024 / 1024  # MB
-            self.cpu_min = min(self.cpu_min, rss_used)
-            self.cpu_max = max(self.cpu_max, rss_used)
-            self.cpu_sum += rss_used
-            self.cpu_count += 1
+#             # CPU
+#             rss_used = process.memory_info().rss / 1024 / 1024  # MB
+#             self.cpu_min = min(self.cpu_min, rss_used)
+#             self.cpu_max = max(self.cpu_max, rss_used)
+#             self.cpu_sum += rss_used
+#             self.cpu_count += 1
 
-            time.sleep(self.interval)
+#             time.sleep(self.interval)
 
-        self.end_time = time.time()
-        pynvml.nvmlShutdown()
+#         self.end_time = time.time()
+#         pynvml.nvmlShutdown()
 
-    def start(self):
-        self.thread = threading.Thread(target=self._track)
-        self.thread.start()
+#     def start(self):
+#         self.thread = threading.Thread(target=self._track)
+#         self.thread.start()
 
-    def stop(self):
-        self._stop_event.set()
-        self.thread.join()
+#     def stop(self):
+#         self._stop_event.set()
+#         self.thread.join()
 
-    def save(self, path):
-        gpu_avg = self.gpu_sum / self.gpu_count if self.gpu_count else 0
-        mem_avg = self.mem_sum / self.mem_count if self.mem_count else 0
-        cpu_avg = self.cpu_sum / self.cpu_count if self.cpu_count else 0
-        duration = self.end_time - self.start_time if self.end_time and self.start_time else 0
+#     def save(self, path):
+#         gpu_avg = self.gpu_sum / self.gpu_count if self.gpu_count else 0
+#         mem_avg = self.mem_sum / self.mem_count if self.mem_count else 0
+#         cpu_avg = self.cpu_sum / self.cpu_count if self.cpu_count else 0
+#         duration = self.end_time - self.start_time if self.end_time and self.start_time else 0
 
-        with open(path, 'w') as f:
-            f.write(f"Tracking Duration (sec): {duration:.2f}\n")
-            f.write(f"GPU Utilization (%): min={self.gpu_min}, max={self.gpu_max}, avg={gpu_avg:.2f}\n")
-            f.write(f"GPU Memory Usage (MiB): min={self.mem_min:.0f}, max={self.mem_max:.0f}, avg={mem_avg:.2f}\n")
-            f.write(f"CPU Memory Usage (MiB): min={self.cpu_min:.0f}, max={self.cpu_max:.0f}, avg={cpu_avg:.2f}\n")
+#         with open(path, 'w') as f:
+#             f.write(f"Tracking Duration (sec): {duration:.2f}\n")
+#             f.write(f"GPU Utilization (%): min={self.gpu_min}, max={self.gpu_max}, avg={gpu_avg:.2f}\n")
+#             f.write(f"GPU Memory Usage (MiB): min={self.mem_min:.0f}, max={self.mem_max:.0f}, avg={mem_avg:.2f}\n")
+#             f.write(f"CPU Memory Usage (MiB): min={self.cpu_min:.0f}, max={self.cpu_max:.0f}, avg={cpu_avg:.2f}\n")
 
 
 
@@ -369,6 +369,7 @@ if __name__ == "__main__":
 
     print("Dataset:")
 
+    '''
     # --------------------------------------------------------------------- #
     # [새] ① 도메인별 train class 분포 / ② pairwise KL / ③ train-vs-test KL #
     # --------------------------------------------------------------------- #
@@ -406,12 +407,15 @@ if __name__ == "__main__":
 
     for i, (tr, va, te) in enumerate(zip(train_dataset, val_dataset, test_dataset)):
         print(f"\tenv{env_ids[i]}:\t{len(tr)}\t|\t{len(va)}\t|\t{len(te)}")
+    
+    '''
 
     # Split each env into train, val, test
     train_splits, val_splits, test_splits = [], [], []
     train_labels = dict()
     for i, env in enumerate(zip(train_dataset, val_dataset, test_dataset)):
         env_train, env_val, env_test = env
+        
         if hparams['class_balanced']:
             train_weights = misc.make_balanced_weights_per_sample(
                 env_train.targets if 'Imbalance' not in args.dataset else env_train.tensors[1].numpy())
@@ -608,15 +612,6 @@ if __name__ == "__main__":
             train_features = {'feats': curr_tr_feats, 'labels': curr_tr_labels}
 
         algorithm.train()
-
-        # algorithm.update 호출 부분 수정
-        if args.algorithm == 'TALLYAlgorithm':
-            # TALLYAlgorithm.update는 단일 튜플 배치를 처리하도록 설계됨
-            step_vals = algorithm.update(minibatches_device, train_features)
-        else:
-            # 다른 알고리즘들은 배치들의 리스트를 처리
-            step_vals = algorithm.update(minibatches_device, train_features) # 이 부분은 기존 코드와 맞게 조정 필요
-
 
         step_vals = algorithm.update(minibatches_device, train_features)
         checkpoint_vals['step_time'].append(time.time() - step_start_time)

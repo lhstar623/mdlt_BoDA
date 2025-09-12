@@ -1,11 +1,11 @@
 #!/bin/bash
 
-#SBATCH --job-name=TALLY_DomainNet
+#SBATCH --job-name=sweep_TALLY_PACS
 #SBATCH --partition=laal_3090
 #SBATCH --nodes=1    
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:0
 #SBATCH --mem=50GB
-#SBATCH --cpus-per-task=5
+#SBATCH --cpus-per-task=6
 #SBATCH --output=./slurm_logs/S-%x.%j.out     
 
 cd /home/hyunggyu/imbalance/multi-domain-imbalance
@@ -51,26 +51,27 @@ cd /home/hyunggyu/imbalance/multi-domain-imbalance
 
 # python -m mdlt.scripts.collect_results --input_dir ./output/sweep_PACS_BoDA_mahal_1stage_mulSeed
 
-python -m mdlt.train \
-  --algorithm TALLYAlgorithm \
-  --output_folder_name TALLY_DomainNet \
-  --data_dir /home/shared \
-  --output_dir ./output \
-  --hparams_seed 0 \
-  --seed 0 
-  # --dataset PACS \
+# python -m mdlt.train \
+#   --algorithm ERM \
+#   --output_folder_name DomainNet126_ERM \
+#   --data_dir /home/shared \
+#   --output_dir ./output \
+#   --hparams_seed 0 \
+#   --seed 0 \
+#   --dataset DomainNet126
+
   # --stage1_folder ./sweep_PACS_BoDA_mahal_1stage_mulSeed \
   # --stage1_algo 'BoDA' \
   # --boda_dist_measure "mahalanobis" \
 
 # MDLD_TIME1
-# python -m mdlt.sweep launch \
-#   --output_folder_name  sweep_PACS_BoDA_mahal_2stage_mulHparam \
-#   --algorithms 'BoDA' \
-#   --data_dir /home/shared \
-#   --dataset PACS \
-#   --output_dir ./output \
-#   --skip_confirmation \
+python -m mdlt.sweep launch \
+  --output_folder_name  sweep_TALLY_PACS \
+  --algorithms 'TALLY' \
+  --data_dir /home/shared \
+  --dataset PACS \
+  --output_dir ./output \
+  --skip_confirmation \
 
 # MDLD_TIME1
 # python -m mdlt.sweep launch \

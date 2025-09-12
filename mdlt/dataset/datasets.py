@@ -1,3 +1,4 @@
+from logging import root
 import os
 import numpy as np
 import pandas as pd
@@ -26,7 +27,8 @@ DATASETS = [
     "PACS",
     "OfficeHome",
     "TerraIncognita",
-    "DomainNet"
+    "DomainNet",
+    "DomainNet126"
 ]
 
 
@@ -495,9 +497,13 @@ class SplitImageFolder(torch.utils.data.Dataset):
 class MultipleEnvironmentImageFolder(MultipleDomainDataset):
     def __init__(self, root, df, split, augment, hparams):
         super().__init__()
-        environments = [f.name for f in os.scandir(root) if f.is_dir()]
-        environments = sorted(environments)
 
+        if any("DomainNet126" in f.name for f in os.scandir(root)):
+            environments = ["clipart", "painting", "real", "sketch"]
+        else:
+            environments = [f.name for f in os.scandir(root) if f.is_dir()]
+        environments = sorted(environments)
+    
         self.datasets = []
         for i, environment in enumerate(environments):
             df_env = df[df['env'] == environment]
@@ -579,28 +585,6 @@ class PACS(MultipleEnvironmentImageFolder):
         super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
 
 
-class DomainNet(MultipleEnvironmentImageFolder):
-    N_STEPS = 15001
-    # TALLY에선 default epochs 15, warmup_epochs 7로 뒀으니 
-    # 새로 추가한 warmup_steps를 적당히 그 절반하면 (default step 5001 default warmup_steps 2000)
-    # 되는데 DomainNet에서만 STEPS가 15000이라 warmup_steps 7000으로 의심됨
-    CHECKPOINT_FREQ = 300
-    ENVIRONMENTS = ["clip", "info", "paint", "quick", "real", "sketch"]
-    MANY_SHOT_THRES = 100
-    FEW_SHOT_THRES = 20
-
-    # When ``MDLT_CSV_SUFFIX`` is set, ``DomainNet${MDLT_CSV_SUFFIX}.csv`` is used
-    def __init__(self, root, split, hparams):
-        self.dir = os.path.join(root, "domain_net")
-        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
-        csv_name = f"DomainNet{csv_suffix}.csv"
-        self.df = pd.read_csv(os.path.join(self.dir, csv_name))
-        # self.df = pd.read_csv(os.path.join(self.dir, "DomainNet.csv"))
-        # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/DomainNet.csv")
-
-        super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
-
-
 class OfficeHome(MultipleEnvironmentImageFolder):
     ENVIRONMENTS = ["A", "C", "P", "R"]
     MANY_SHOT_THRES = 60
@@ -635,4 +619,41 @@ class TerraIncognita(MultipleEnvironmentImageFolder):
         self.df = pd.read_csv(os.path.join(self.dir, csv_name))
         # self.df = pd.read_csv(os.path.join(self.dir, "TerraIncognita.csv"))
         # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/TerraIncognita.csv")
+        super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
+
+class DomainNet(MultipleEnvironmentImageFolder):
+    N_STEPS = 15001
+    # TALLY에선 default epochs 15, warmup_epochs 7로 뒀으니 
+    # 새로 추가한 warmup_steps를 적당히 그 절반하면 (default step 5001 default warmup_steps 2000)
+    # 되는데 DomainNet에서만 STEPS가 15000이라 warmup_steps 7000으로 의심됨
+    CHECKPOINT_FREQ = 300
+    ENVIRONMENTS = ["clip", "info", "paint", "quick", "real", "sketch"]
+    MANY_SHOT_THRES = 100
+    FEW_SHOT_THRES = 20
+
+    # When ``MDLT_CSV_SUFFIX`` is set, ``DomainNet${MDLT_CSV_SUFFIX}.csv`` is used
+    def __init__(self, root, split, hparams):
+        self.dir = os.path.join(root, "domain_net")
+        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
+        csv_name = f"DomainNet{csv_suffix}.csv"
+        self.df = pd.read_csv(os.path.join(self.dir, csv_name))
+        # self.df = pd.read_csv(os.path.join(self.dir, "DomainNet.csv"))
+        # self.df = pd.read_csv("/home/hyunggyu/imbalance/multi-domain-imbalance/mdlt/dataset/split/DomainNet.csv")
+
+        super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
+
+# DomainNet126 클래스
+class DomainNet126(MultipleEnvironmentImageFolder):
+    N_STEPS = 15001
+    CHECKPOINT_FREQ = 300
+    ENVIRONMENTS = ["clip", "paint", "real", "sketch"]
+    MANY_SHOT_THRES = 100
+    FEW_SHOT_THRES = 20
+
+    # When ``MDLT_CSV_SUFFIX`` is set, ``DomainNet126${MDLT_CSV_SUFFIX}.csv`` is used
+    def __init__(self, root, split, hparams):
+        self.dir = os.path.join(root, "domain_net")
+        csv_suffix = os.environ.get("MDLT_CSV_SUFFIX", "")
+        csv_name = f"DomainNet126{csv_suffix}.csv"
+        self.df = pd.read_csv(os.path.join(self.dir, csv_name))
         super().__init__(self.dir, self.df, split, hparams['data_augmentation'], hparams)
