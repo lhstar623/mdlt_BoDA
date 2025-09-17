@@ -29,6 +29,20 @@ from torch.utils.data import DataLoader
 # import threading
 # import time
 
+# MMD_debug
+import os, math, itertools, torch
+DEBUG_MMD = os.environ.get("DEBUG_MMD", "0") == "1"
+
+def _safe_stat(t):
+    try:
+        return dict(shape=tuple(t.shape), min=float(t.min()), max=float(t.max()), mean=float(t.float().mean()))
+    except Exception:
+        return {"shape": tuple(t.shape)}
+
+def _every(n, step):  # print every n steps
+    return (step % n) == 0
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SubsetWithTargets: torch.utils.data.Subset 에 .targets 속성까지 복사
 # ──────────────────────────────────────────────────────────────────────────────
@@ -505,8 +519,11 @@ if __name__ == "__main__":
         )
     elif args.algorithm == 'MLIR':
         algorithm = algorithm_class(train_dataset.input_shape, train_dataset.num_classes, len(train_dataset.ENVIRONMENTS), hparams)   
-     
+    else:
+        algorithm = algorithm_class(input_shape, num_classes, len(train_dataset), hparams, env_labels=train_labels)
     # --- [ 수정 끝 ] ---
+
+    
 
     # load stage1 model if using 2-stage algorithm
     if 'CRT' in args.algorithm:
@@ -569,7 +586,9 @@ if __name__ == "__main__":
             shutil.copyfile(filename, filename.replace('pkl', 'best.pkl'))
 
     last_results_keys = None
-    for step in tqdm(range(start_step, n_steps), total=n_steps):
+
+    # for step in tqdm(range(start_step, n_steps), total=n_steps):
+    for step in range(start_step, n_steps):
         step_start_time = time.time()
 
         # --- [ TALLY 통합 수정 ] ---
@@ -628,6 +647,11 @@ if __name__ == "__main__":
             }
             for key, val in checkpoint_vals.items():
                 results[key] = np.mean(val)
+            
+            # For unstability MMD in domainNet (Hyunggyu)
+            if args.algorithm == 'MMD' and (results['penalty'] < 0.01):
+                print("Unstability MMD penalty < 0.01, break training")
+                break
 
             evals = zip(eval_loader_names, eval_loaders, eval_weights)
             class_acc_output = collections.defaultdict(list)

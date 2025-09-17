@@ -43,7 +43,7 @@ def _hparams(algorithm, dataset, random_seed):
     if 'BoDA' in algorithm:
         # scuttie: BoDA hyperparameters
         _hparam('cross_env_gamma', 1.5, lambda r: 1.0)
-        if dataset == 'DomainNet':
+        if dataset == 'DomainNet' or dataset == 'DomainNet126':
             _hparam('boda_start_step', 3000, lambda r: int(1000 * r.choice(range(2, 6))))
             _hparam('feat_update_freq', 2000, lambda r: int(10 * r.uniform(150, 300)))
         else:
@@ -90,7 +90,7 @@ def _hparams(algorithm, dataset, random_seed):
     elif algorithm == 'CAWRA_TAROT':
         # BoDA와 동일한 기본 하이퍼파라미터 사용
         _hparam('cross_env_gamma', 1.5, lambda r: 1.0)
-        if dataset == 'DomainNet':
+        if dataset == 'DomainNet' or dataset == 'DomainNet126':
             _hparam('boda_start_step', 3000, lambda r: int(1000 * r.choice(range(2, 6))))
             _hparam('feat_update_freq', 2000, lambda r: int(10 * r.uniform(150, 300)))
         else:
@@ -168,7 +168,7 @@ def _hparams(algorithm, dataset, random_seed):
 
     if dataset in SMALL_IMAGES:
         _hparam('batch_size', 64, lambda r: int(2**r.uniform(3, 9)))
-    elif dataset == 'DomainNet':
+    elif dataset == 'DomainNet' or dataset == 'DomainNet126':
         _hparam('batch_size', 32, lambda r: 32)
     else:
         _hparam('batch_size', 24, lambda r: 24)

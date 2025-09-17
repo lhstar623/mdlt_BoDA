@@ -1,39 +1,14 @@
 #!/bin/bash
 
-#SBATCH --job-name=sweep_TALLY_PACS
+#SBATCH --job-name=BoDA_hparam_DN126
 #SBATCH --partition=laal_3090
 #SBATCH --nodes=1    
-#SBATCH --gres=gpu:0
+#SBATCH --gres=gpu:1
 #SBATCH --mem=50GB
 #SBATCH --cpus-per-task=6
 #SBATCH --output=./slurm_logs/S-%x.%j.out     
 
-# cd /home/hyunggyu/imbalance/multi-domain-imbalance
-
-# nvidia-smi
-
-source ~/.bashrc
-source ~/anaconda3/bin/activate
-conda activate spec
-
-#     "VLCS",
-#     "PACS",
-#     "OfficeHome",
-#     "TerraIncognita",
-#     "DomainNet"
-
-python -m mdlt.train \
-  --dataset TerraIncognita \
-  --algorithm MLIR \
-  --output_folder_name res50_test \
-  --data_dir /home/shared \
-  --output_dir ./output \
-  --hparams '{"resnet50": true}' \
-  --hparams_seed 0 \
-  --seed 0
-
-
-# python -m mdlt.scripts.download --data_dir /home/shared
+cd /home/hyunggyu/imbalance/multi-domain-imbalance
 
 # sweep 실행
 # python -m mdlt.sweep launch \
@@ -61,11 +36,9 @@ python -m mdlt.train \
 #   --output_dir ./output \
 #   --boda_dist_measure "mahalanobis" \
 
-# python -m mdlt.scripts.collect_results --input_dir ./output/sweep_PACS_BoDA_mahal_1stage_mulSeed
-
 # python -m mdlt.train \
-#   --algorithm ERM \
-#   --output_folder_name DomainNet126_ERM \
+#   --algorithm MLIR \
+#   --output_folder_name DN126_MLIR \
 #   --data_dir /home/shared \
 #   --output_dir ./output \
 #   --hparams_seed 0 \
@@ -76,13 +49,51 @@ python -m mdlt.train \
 # --boda_dist_measure "mahalanobis" \
 
 # MDLD_TIME1
-python -m mdlt.sweep launch \
-  --output_folder_name  sweep_TALLY_PACS \
-  --algorithms 'TALLY' \
-  --data_dir /home/shared \
-  --dataset PACS \
-  --output_dir ./output \
-  --skip_confirmation \
+# python -m mdlt.sweep launch \
+#   --output_folder_name  sweep_DN126_MLIR \
+#   --algorithms MLIR \
+#   --data_dir /home/shared \
+#   --dataset DomainNet126 \
+#   --output_dir ./output \
+#   --skip_confirmation \
+#   --n_hparams 1 \
+#   --n_trials 3  # number of random seeds
+
+# # 단일 ALG, DATASET, HPARAMS_SEED 고정, 여러 SEED 실행
+# ALGO="MMD"
+# OUTPUT_FOLDER_NAME="DN126_MMD"
+# DATA_DIR="/home/shared"
+# OUTPUT_DIR="./output"
+# HPARAMS_SEED=0
+# DATASET="DomainNet126"
+
+# # 시작값과 개수 설정 (원하는 만큼 반복)
+# START=45
+# COUNT=20   # 몇 개의 시드를 돌릴지 지정 (예: 5,6,7 → COUNT=3)
+
+# # 기본 시드 목록을 seq로 생성
+# SEEDS=($(seq $START $((START + COUNT - 1))))
+
+# # 인자를 주면 그 시드들로 덮어씀
+# if [ "$#" -gt 0 ]; then
+#   SEEDS=("$@")
+# fi
+
+# echo "[INFO] Running seeds: ${SEEDS[*]}"
+# for SEED in "${SEEDS[@]}"; do
+#   echo "==> Launching seed ${SEED}"
+#   python -m mdlt.train \
+#     --algorithm "${ALGO}" \
+#     --output_folder_name "${OUTPUT_FOLDER_NAME}" \
+#     --data_dir "${DATA_DIR}" \
+#     --output_dir "${OUTPUT_DIR}" \
+#     --hparams_seed "${HPARAMS_SEED}" \
+#     --seed "${SEED}" \
+#     --dataset "${DATASET}"
+# done
+
+# echo "[DONE] All runs finished."
+
 
 # MDLD_TIME1
 # python -m mdlt.sweep launch \
@@ -119,7 +130,7 @@ python -m mdlt.sweep launch \
 
 # collect 실행
 # python -m mdlt.scripts.collect_results \
-#   --input_dir /home/hyunggyu/imbalance/multi-domain-imbalance/output/sweep_res18_mydataset2
+#   --input_dir /home/hyunggyu/imbalance/multi-domain-imbalance/output/sweep_DN126_SqrtRW-BoDA
   
 
 
